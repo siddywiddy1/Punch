@@ -34,6 +34,7 @@ class ClaudeRunner:
         session_id: str | None = None,
         working_dir: str | None = None,
         output_format: str = "text",
+        allowed_tools: list[str] | None = None,
     ) -> list[str]:
         cmd = [self.claude_command]
 
@@ -49,6 +50,10 @@ class ClaudeRunner:
         if output_format == "json":
             cmd.extend(["--output-format", "json"])
 
+        if allowed_tools:
+            for tool in allowed_tools:
+                cmd.extend(["--allowedTools", tool])
+
         cmd.extend(["-p", prompt])
 
         return cmd
@@ -62,6 +67,7 @@ class ClaudeRunner:
         working_dir: str | None = None,
         timeout: int = 300,
         output_format: str = "text",
+        allowed_tools: list[str] | None = None,
     ) -> RunResult:
         cmd = self._build_command(
             prompt=prompt,
@@ -69,6 +75,7 @@ class ClaudeRunner:
             system_prompt=system_prompt,
             session_id=session_id,
             output_format=output_format,
+            allowed_tools=allowed_tools,
         )
 
         logger.info(f"Running Claude Code: {' '.join(cmd[:5])}...")

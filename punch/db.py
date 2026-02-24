@@ -9,7 +9,7 @@ from typing import Any
 _ALLOWED_COLUMNS = {
     "tasks": {"status", "result", "error", "session_id", "working_dir", "started_at", "completed_at", "priority"},
     "cron_jobs": {"name", "schedule", "agent_type", "prompt", "enabled", "last_run", "next_run"},
-    "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent"},
+    "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent", "allowed_tools"},
     "browser_sessions": {"url", "screenshot_path", "status"},
 }
 
@@ -74,6 +74,7 @@ class Database:
                 working_dir TEXT,
                 timeout_seconds INTEGER DEFAULT 300,
                 max_concurrent INTEGER DEFAULT 1,
+                allowed_tools TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 

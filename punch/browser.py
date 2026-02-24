@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
+from punch.sanitizer import sanitize_and_frame
+
 logger = logging.getLogger("punch.browser")
 
 
@@ -100,14 +102,22 @@ class BrowserManager:
         finally:
             await page.close()
 
-    async def scrape_text(self, url: str, selector: str = "body") -> str:
-        """Navigate to URL and extract text content."""
+    async def scrape_text(self, url: str, selector: str = "body",
+                          sanitize: bool = True) -> str:
+        """Navigate to URL and extract text content.
+
+        When sanitize=True (default), the scraped content is sanitized
+        to defend against prompt injection and wrapped in data delimiters.
+        """
         page = await self.new_page()
         try:
             await page.goto(url, wait_until="networkidle", timeout=30000)
             element = await page.query_selector(selector)
             if element:
-                return await element.inner_text()
+                text = await element.inner_text()
+                if sanitize:
+                    return sanitize_and_frame(text, source=url)
+                return text
             return ""
         finally:
             await page.close()

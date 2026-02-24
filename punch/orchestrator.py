@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Callable, Awaitable, List
 
@@ -61,6 +62,14 @@ class Orchestrator:
         working_dir = task.get("working_dir") or (agent["working_dir"] if agent else None)
         timeout = agent["timeout_seconds"] if agent else 300
 
+        # Parse allowed_tools from agent config (stored as JSON array string)
+        allowed_tools = None
+        if agent and agent.get("allowed_tools"):
+            try:
+                allowed_tools = json.loads(agent["allowed_tools"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         # Mark as running
         await self.db.update_task(task_id, status="running")
         await self._notify(task_id, "running", f"Starting: {task['prompt'][:100]}")
@@ -78,6 +87,7 @@ class Orchestrator:
             session_id=task.get("session_id"),
             working_dir=working_dir,
             timeout=timeout,
+            allowed_tools=allowed_tools,
         )
 
         # Log the response

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Logs - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <h2 class="text-2xl font-bold">Logs</h2>
+    <div class="space-y-2" hx-get="/htmx/tasks/refresh" hx-trigger="every 10s" hx-swap="innerHTML">
+        {% for task in tasks %}
+        <a href="/tasks/{{ task.id }}" class="block bg-gray-900 rounded-lg p-3 border border-gray-800 hover:border-gray-700">
+            <div class="flex items-center justify-between text-xs">
+                <div class="flex items-center space-x-2">
+                    <span class="text-gray-500">{{ task.created_at }}</span>
+                    <span class="px-2 py-0.5 rounded {% if task.status == 'completed' %}bg-green-900/50 text-green-400{% elif task.status == 'failed' %}bg-red-900/50 text-red-400{% elif task.status == 'running' %}bg-yellow-900/50 text-yellow-400{% else %}bg-gray-800 text-gray-400{% endif %}">{{ task.status }}</span>
+                    <span class="text-gray-400">{{ task.agent_type }}</span>
+                </div>
+                <span class="text-gray-500">{{ task.source }}</span>
+            </div>
+            <div class="text-sm text-gray-300 mt-1">{{ task.prompt[:120] }}{% if task.prompt|length > 120 %}...{% endif %}</div>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

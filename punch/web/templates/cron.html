@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Cron Jobs - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h2 class="text-2xl font-bold">Cron Jobs</h2>
+        <button onclick="document.getElementById('new-cron-modal').classList.toggle('hidden')"
+                class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">New Job</button>
+    </div>
+    <div id="new-cron-modal" class="hidden bg-gray-900 rounded-lg p-6 border border-gray-800">
+        <h3 class="text-lg font-semibold mb-4">Create Cron Job</h3>
+        <form id="cron-form" class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Name</label>
+                    <input name="name" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Email Triage">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Schedule (cron)</label>
+                    <input name="schedule" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="*/15 * * * *">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Agent Type</label>
+                <select name="agent_type" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                    <option value="general">General</option>
+                    <option value="email">Email</option>
+                    <option value="code">Code</option>
+                    <option value="research">Research</option>
+                    <option value="browser">Browser</option>
+                    <option value="macos">macOS</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Prompt</label>
+                <textarea name="prompt" rows="3" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"></textarea>
+            </div>
+            <button type="submit" class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">Create</button>
+        </form>
+        <script>
+            document.getElementById('cron-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const body = Object.fromEntries(new FormData(e.target));
+                await fetch('/api/cron', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                location.reload();
+            });
+        </script>
+    </div>
+    <div class="space-y-3">
+        {% for job in jobs %}
+        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800 flex items-center justify-between">
+            <div>
+                <div class="flex items-center space-x-3">
+                    <span class="font-medium">{{ job.name }}</span>
+                    <code class="text-xs bg-gray-800 px-2 py-1 rounded text-gray-400">{{ job.schedule }}</code>
+                    <span class="text-xs text-gray-500">{{ job.agent_type }}</span>
+                </div>
+                <p class="text-sm text-gray-400 mt-1">{{ job.prompt[:100] }}{% if job.prompt|length > 100 %}...{% endif %}</p>
+                {% if job.last_run %}<div class="text-xs text-gray-600 mt-1">Last run: {{ job.last_run }}</div>{% endif %}
+            </div>
+            <div class="flex items-center space-x-3">
+                <button onclick="toggleCron({{ job.id }})" class="text-xs px-3 py-1 rounded-lg {% if job.enabled %}bg-green-900/50 text-green-400{% else %}bg-gray-800 text-gray-500{% endif %}">
+                    {{ "Enabled" if job.enabled else "Disabled" }}
+                </button>
+                <button onclick="deleteCron({{ job.id }})" class="text-xs text-red-400 hover:text-red-300">Delete</button>
+            </div>
+        </div>
+        {% endfor %}
+        {% if not jobs %}
+        <div class="text-center py-8 text-gray-600">No cron jobs configured.</div>
+        {% endif %}
+    </div>
+</div>
+<script>
+    async function toggleCron(id) {
+        await fetch(`/api/cron/${id}/toggle`, { method: 'PUT' });
+        location.reload();
+    }
+    async function deleteCron(id) {
+        if (confirm('Delete this cron job?')) {
+            await fetch(`/api/cron/${id}`, { method: 'DELETE' });
+            location.reload();
+        }
+    }
+</script>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Agents - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h2 class="text-2xl font-bold">Agents</h2>
+        <button onclick="document.getElementById('new-agent-modal').classList.toggle('hidden')"
+                class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">New Agent</button>
+    </div>
+    <div id="new-agent-modal" class="hidden bg-gray-900 rounded-lg p-6 border border-gray-800">
+        <h3 class="text-lg font-semibold mb-4">Create Agent</h3>
+        <form id="agent-form" class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Name</label>
+                <input name="name" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="e.g. email, code, research">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">System Prompt</label>
+                <textarea name="system_prompt" rows="4" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="You are an email assistant..."></textarea>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Working Directory</label>
+                    <input name="working_dir" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="/path/to/workspace">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Timeout (seconds)</label>
+                    <input name="timeout_seconds" type="number" value="300" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                </div>
+            </div>
+            <button type="submit" class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">Create</button>
+        </form>
+        <script>
+            document.getElementById('agent-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const body = Object.fromEntries(fd);
+                body.timeout_seconds = parseInt(body.timeout_seconds);
+                await fetch('/api/agents', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                location.reload();
+            });
+        </script>
+    </div>
+    <div class="grid grid-cols-1 gap-4">
+        {% for agent in agents %}
+        <div class="bg-gray-900 rounded-lg p-6 border border-gray-800">
+            <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold text-punch-400">{{ agent.name }}</h3>
+                <span class="text-xs text-gray-500">timeout: {{ agent.timeout_seconds }}s</span>
+            </div>
+            <pre class="bg-gray-800 rounded p-3 text-xs text-gray-300 whitespace-pre-wrap mb-2">{{ agent.system_prompt }}</pre>
+            {% if agent.working_dir %}
+            <div class="text-xs text-gray-500">Working dir: {{ agent.working_dir }}</div>
+            {% endif %}
+        </div>
+        {% endfor %}
+        {% if not agents %}
+        <div class="text-center py-8 text-gray-600">No agents configured. Create one to get started.</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

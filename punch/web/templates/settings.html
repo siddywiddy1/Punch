@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Settings - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <h2 class="text-2xl font-bold">Settings</h2>
+    <div class="bg-gray-900 rounded-lg p-6 border border-gray-800">
+        <form id="settings-form" class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Setting Key</label>
+                <input name="key" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Value</label>
+                <textarea name="value" rows="2" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"></textarea>
+            </div>
+            <button type="submit" class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">Save</button>
+        </form>
+        <script>
+            document.getElementById('settings-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                await fetch(`/api/settings/${fd.get('key')}`, {
+                    method: 'PUT', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({value: fd.get('value')}),
+                });
+                location.reload();
+            });
+        </script>
+    </div>
+    <div class="space-y-2">
+        {% for s in settings %}
+        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800 flex items-center justify-between">
+            <div>
+                <span class="text-sm font-medium text-punch-400">{{ s.key }}</span>
+                <span class="text-sm text-gray-400 ml-4">{{ s.value[:100] }}</span>
+            </div>
+            <span class="text-xs text-gray-600">{{ s.updated_at }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

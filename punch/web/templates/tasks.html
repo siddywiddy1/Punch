@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Tasks - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h2 class="text-2xl font-bold">Tasks</h2>
+        <div class="flex space-x-2">
+            <a href="/tasks" class="px-3 py-1 text-sm rounded-lg {% if not filter_status %}bg-gray-800 text-white{% else %}text-gray-400 hover:text-white{% endif %}">All</a>
+            {% for s in ["pending", "running", "completed", "failed"] %}
+            <a href="/tasks?status={{ s }}" class="px-3 py-1 text-sm rounded-lg {% if filter_status == s %}bg-gray-800 text-white{% else %}text-gray-400 hover:text-white{% endif %}">{{ s|capitalize }}</a>
+            {% endfor %}
+        </div>
+    </div>
+    <div id="task-feed" hx-get="/htmx/tasks/refresh{% if filter_status %}?status={{ filter_status }}{% endif %}" hx-trigger="every 10s" hx-swap="innerHTML" class="space-y-2">
+        {% include "partials/task_list.html" %}
+    </div>
+</div>
+{% endblock %}

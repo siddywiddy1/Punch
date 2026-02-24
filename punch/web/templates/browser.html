@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Browser - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <h2 class="text-2xl font-bold">Browser Sessions</h2>
+    <div class="space-y-4">
+        {% for session in sessions %}
+        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-medium">Session #{{ session.id }}</span>
+                <span class="text-xs px-2 py-1 rounded-full {% if session.status == 'active' %}bg-green-900/50 text-green-400{% else %}bg-gray-800 text-gray-400{% endif %}">{{ session.status }}</span>
+            </div>
+            {% if session.url %}<div class="text-sm text-gray-400">{{ session.url }}</div>{% endif %}
+            {% if session.screenshot_path %}<img src="/static/screenshots/{{ session.screenshot_path }}" class="mt-2 rounded border border-gray-800 max-w-full">{% endif %}
+        </div>
+        {% endfor %}
+        {% if not sessions %}
+        <div class="text-center py-8 text-gray-600">No browser sessions.</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

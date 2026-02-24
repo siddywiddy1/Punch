@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, Form, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -16,6 +17,58 @@ logger = logging.getLogger("punch.web")
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+
+# --- Settings Schema ---
+
+SETTINGS_SCHEMA = [
+    {
+        "key": "claude",
+        "label": "Claude",
+        "icon": "M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z",
+        "fields": [
+            {"key": "claude_command", "label": "Claude Command Path", "type": "text", "default": "claude",
+             "help": "Path to the Claude CLI binary"},
+            {"key": "max_concurrent_tasks", "label": "Max Concurrent Tasks", "type": "number", "default": "4",
+             "help": "Maximum number of tasks running simultaneously"},
+        ],
+    },
+    {
+        "key": "telegram",
+        "label": "Telegram",
+        "icon": "M12 19l9 2-9-18-9 18 9-2zm0 0v-8",
+        "fields": [
+            {"key": "telegram_token", "label": "Bot Token", "type": "password", "default": "",
+             "help": "Token from @BotFather on Telegram"},
+            {"key": "telegram_allowed_users", "label": "Allowed User IDs", "type": "text", "default": "",
+             "help": "Comma-separated Telegram user IDs (get yours from @userinfobot)"},
+        ],
+    },
+    {
+        "key": "web",
+        "label": "Web",
+        "icon": "M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9",
+        "fields": [
+            {"key": "web_host", "label": "Host", "type": "text", "default": "127.0.0.1",
+             "help": "Bind address for the web server"},
+            {"key": "web_port", "label": "Port", "type": "number", "default": "8080",
+             "help": "Port number for the web server"},
+            {"key": "api_key", "label": "API Key", "type": "password", "default": "",
+             "help": "API key for authentication (leave empty for localhost-only mode)"},
+        ],
+    },
+    {
+        "key": "system",
+        "label": "System",
+        "icon": "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
+        "fields": [
+            {"key": "log_level", "label": "Log Level", "type": "select", "default": "INFO",
+             "options": ["DEBUG", "INFO", "WARNING", "ERROR"],
+             "help": "Logging verbosity level"},
+            {"key": "data_dir", "label": "Data Directory", "type": "text", "default": "data",
+             "help": "Directory for storing data files"},
+        ],
+    },
+]
 
 
 def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | None = None) -> FastAPI:
@@ -27,14 +80,17 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     app.state.orchestrator = orchestrator
     app.state.scheduler = scheduler
 
-    # API key authentication middleware
+    # Paths that skip onboarding redirect
+    _SKIP_ONBOARDING = ("/static", "/api/", "/onboarding", "/htmx/onboarding")
+
+    # API key authentication + onboarding middleware
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
+        path = request.url.path
+
         # Skip auth if no API key configured (localhost-only mode)
         if api_key:
-            # Allow static files without auth
-            if not request.url.path.startswith("/static"):
-                # Check header, query param, or cookie
+            if not path.startswith("/static"):
                 provided = (
                     request.headers.get("X-API-Key")
                     or request.query_params.get("api_key")
@@ -42,8 +98,14 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
                 )
                 if provided != api_key:
                     return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        # Onboarding redirect: if onboarding_complete not set, redirect HTML pages
+        if not any(path.startswith(p) for p in _SKIP_ONBOARDING):
+            onboarding_done = await db.get_setting("onboarding_complete")
+            if not onboarding_done and path != "/onboarding":
+                return RedirectResponse("/onboarding", status_code=302)
+
         response = await call_next(request)
-        # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         return response
@@ -54,10 +116,17 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     # --- HTML Pages ---
 
     @app.get("/", response_class=HTMLResponse)
-    async def home(request: Request):
+    async def root(request: Request):
+        onboarding_done = await db.get_setting("onboarding_complete")
+        if not onboarding_done:
+            return RedirectResponse("/onboarding", status_code=302)
+        return RedirectResponse("/chat", status_code=302)
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def dashboard(request: Request):
         recent_tasks = await db.list_tasks(limit=20)
         return templates.TemplateResponse("home.html", {
-            "request": request, "tasks": recent_tasks, "page": "home",
+            "request": request, "tasks": recent_tasks, "page": "dashboard",
         })
 
     @app.get("/tasks", response_class=HTMLResponse)
@@ -101,15 +170,16 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
-        settings = await db.list_settings()
+        settings_list = await db.list_settings()
+        settings_map = {s["key"]: s["value"] for s in settings_list}
         return templates.TemplateResponse("settings.html", {
-            "request": request, "settings": settings, "page": "settings",
+            "request": request, "settings": settings_map,
+            "schema": SETTINGS_SCHEMA, "page": "settings",
         })
 
     @app.get("/projects", response_class=HTMLResponse)
     async def projects_page(request: Request, status: str = None):
         projects = await db.list_projects(status=status)
-        # Attach task counts to each project
         for p in projects:
             pts = await db.list_project_tasks(p["id"])
             p["task_count"] = len(pts)
@@ -131,11 +201,197 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
 
     @app.get("/logs", response_class=HTMLResponse)
     async def logs_page(request: Request):
-        # Recent tasks with their conversations serve as logs
         tasks = await db.list_tasks(limit=50)
         return templates.TemplateResponse("logs.html", {
             "request": request, "tasks": tasks, "page": "logs",
         })
+
+    # --- Chat Pages ---
+
+    @app.get("/chat", response_class=HTMLResponse)
+    async def chat_redirect(request: Request):
+        chats = await db.list_chats(limit=1)
+        if chats:
+            return RedirectResponse(f"/chat/{chats[0]['id']}", status_code=302)
+        # Create a new chat
+        chat_id = await db.create_chat()
+        return RedirectResponse(f"/chat/{chat_id}", status_code=302)
+
+    @app.get("/chat/{chat_id}", response_class=HTMLResponse)
+    async def chat_page(request: Request, chat_id: int):
+        chat = await db.get_chat(chat_id)
+        if not chat or not chat["is_active"]:
+            return RedirectResponse("/chat", status_code=302)
+        messages = await db.get_chat_messages(chat_id)
+        chats = await db.list_chats(limit=50)
+        return templates.TemplateResponse("chat.html", {
+            "request": request, "chat": chat, "messages": messages,
+            "chats": chats, "page": "chat",
+        })
+
+    # --- Chat HTMX ---
+
+    @app.post("/htmx/chat/{chat_id}/send", response_class=HTMLResponse)
+    async def htmx_chat_send(request: Request, chat_id: int, message: str = Form(...)):
+        if orchestrator:
+            # Store user message and create pending assistant message
+            await db.add_chat_message(chat_id, role="user", content=message)
+            await db.add_chat_message(chat_id, role="assistant", content="", status="pending")
+            # Kick off async chat processing
+            asyncio.create_task(_process_chat(chat_id, message))
+        messages = await db.get_chat_messages(chat_id)
+        return templates.TemplateResponse("partials/chat_messages.html", {
+            "request": request, "messages": messages, "chat_id": chat_id,
+        })
+
+    async def _process_chat(chat_id: int, message: str):
+        """Background task: run chat and update pending message."""
+        try:
+            chat = await db.get_chat(chat_id)
+            if not chat:
+                return
+            agent = await db.get_agent("general")
+            system_prompt = agent["system_prompt"] if agent else None
+
+            result = await orchestrator.runner.run(
+                prompt=message,
+                oneshot=False,
+                system_prompt=system_prompt,
+                session_id=chat.get("session_id"),
+                output_format="json",
+            )
+
+            if result.session_id:
+                await db.update_chat(chat_id, session_id=result.session_id)
+
+            response = result.stdout if result.success else f"Error: {result.stderr}"
+
+            # Find and update the pending message
+            msgs = await db.get_chat_messages(chat_id)
+            for msg in reversed(msgs):
+                if msg["role"] == "assistant" and msg["status"] == "pending":
+                    await db.update_chat_message(msg["id"], content=response, status="complete")
+                    break
+
+            await db.update_chat(chat_id)
+
+            # Auto-title
+            if chat["title"] == "New Chat":
+                title = message[:50].strip()
+                if len(message) > 50:
+                    title += "..."
+                await db.update_chat(chat_id, title=title)
+        except Exception as e:
+            logger.error(f"Chat processing error for chat {chat_id}: {e}")
+            msgs = await db.get_chat_messages(chat_id)
+            for msg in reversed(msgs):
+                if msg["role"] == "assistant" and msg["status"] == "pending":
+                    await db.update_chat_message(msg["id"], content=f"Error: {str(e)}", status="complete")
+                    break
+
+    @app.get("/htmx/chat/{chat_id}/messages", response_class=HTMLResponse)
+    async def htmx_chat_messages(request: Request, chat_id: int):
+        messages = await db.get_chat_messages(chat_id)
+        return templates.TemplateResponse("partials/chat_messages.html", {
+            "request": request, "messages": messages, "chat_id": chat_id,
+        })
+
+    @app.post("/htmx/chat/new", response_class=HTMLResponse)
+    async def htmx_chat_new(request: Request):
+        chat_id = await db.create_chat()
+        response = HTMLResponse("")
+        response.headers["HX-Redirect"] = f"/chat/{chat_id}"
+        return response
+
+    @app.delete("/htmx/chat/{chat_id}", response_class=HTMLResponse)
+    async def htmx_chat_delete(request: Request, chat_id: int):
+        await db.delete_chat(chat_id)
+        response = HTMLResponse("")
+        response.headers["HX-Redirect"] = "/chat"
+        return response
+
+    # --- Chat API ---
+
+    @app.post("/api/chat")
+    async def api_create_chat(request: Request):
+        body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        title = body.get("title", "New Chat") if body else "New Chat"
+        chat_id = await db.create_chat(title=title)
+        return {"chat_id": chat_id}
+
+    @app.post("/api/chat/{chat_id}/message")
+    async def api_send_message(chat_id: int, request: Request):
+        body = await request.json()
+        message = body.get("message", "")
+        if not message:
+            return JSONResponse({"error": "message is required"}, status_code=400)
+        if not orchestrator:
+            return JSONResponse({"error": "No orchestrator"}, status_code=500)
+        response = await orchestrator.chat(chat_id, message)
+        return {"response": response}
+
+    @app.get("/api/chat/{chat_id}/messages")
+    async def api_list_messages(chat_id: int):
+        messages = await db.get_chat_messages(chat_id)
+        return {"messages": messages}
+
+    # --- Onboarding ---
+
+    @app.get("/onboarding", response_class=HTMLResponse)
+    async def onboarding_page(request: Request):
+        onboarding_done = await db.get_setting("onboarding_complete")
+        if onboarding_done:
+            return RedirectResponse("/chat", status_code=302)
+        return templates.TemplateResponse("onboarding.html", {"request": request})
+
+    @app.post("/htmx/onboarding/check-claude", response_class=HTMLResponse)
+    async def htmx_onboarding_check_claude(request: Request):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "claude", "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            version = stdout.decode("utf-8", errors="replace").strip()
+            success = proc.returncode == 0
+        except Exception:
+            version = ""
+            success = False
+        return templates.TemplateResponse("partials/onboarding_claude_check.html", {
+            "request": request, "success": success, "version": version,
+        })
+
+    @app.post("/htmx/onboarding/save-telegram", response_class=HTMLResponse)
+    async def htmx_onboarding_save_telegram(request: Request,
+                                             telegram_token: str = Form(""),
+                                             telegram_users: str = Form("")):
+        if telegram_token.strip():
+            await db.set_setting("telegram_token", telegram_token.strip())
+        if telegram_users.strip():
+            await db.set_setting("telegram_allowed_users", telegram_users.strip())
+        return templates.TemplateResponse("partials/onboarding_telegram_saved.html", {
+            "request": request, "saved": bool(telegram_token.strip()),
+        })
+
+    @app.post("/htmx/onboarding/complete", response_class=HTMLResponse)
+    async def htmx_onboarding_complete(request: Request):
+        await db.set_setting("onboarding_complete", "true")
+        response = HTMLResponse("")
+        response.headers["HX-Redirect"] = "/chat"
+        return response
+
+    # --- Settings HTMX ---
+
+    @app.post("/htmx/settings/save", response_class=HTMLResponse)
+    async def htmx_settings_save(request: Request):
+        form = await request.form()
+        for section in SETTINGS_SCHEMA:
+            for field in section["fields"]:
+                value = form.get(field["key"], "")
+                if value:
+                    await db.set_setting(field["key"], str(value))
+        return templates.TemplateResponse("partials/settings_saved.html", {"request": request})
 
     # --- API Endpoints ---
 
@@ -170,7 +426,6 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     @app.post("/htmx/tasks/create", response_class=HTMLResponse)
     async def htmx_create_task(request: Request, agent_type: str = Form(...), prompt: str = Form(...)):
         if orchestrator:
-            import asyncio
             task_id = await orchestrator.submit(agent_type, prompt, source="dashboard")
             asyncio.create_task(orchestrator.execute_task(task_id))
         else:
@@ -259,7 +514,6 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     _MAX_PROMPT_SIZE = 20_000
 
     def _validate_depends_on(deps) -> list[int] | None:
-        """Validate depends_on is a list of integers. Returns None on invalid input."""
         if not isinstance(deps, list):
             return None
         if not all(isinstance(d, int) for d in deps):
@@ -276,7 +530,6 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         if len(brief) > _MAX_BRIEF_SIZE:
             return JSONResponse({"error": f"brief exceeds {_MAX_BRIEF_SIZE} chars"}, status_code=400)
         project_id = await db.create_project(name=name, brief=brief)
-        # Optionally create inline tasks
         for i, t in enumerate(body.get("tasks", [])):
             raw_deps = t.get("depends_on", [])
             deps = _validate_depends_on(raw_deps)
@@ -345,7 +598,6 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         prompt = body.get("prompt", "")
         if len(prompt) > _MAX_PROMPT_SIZE:
             return JSONResponse({"error": f"prompt exceeds {_MAX_PROMPT_SIZE} chars"}, status_code=400)
-        # Validate deps reference tasks in the same project
         if deps:
             existing = await db.list_project_tasks(project_id)
             existing_ids = {t["id"] for t in existing}

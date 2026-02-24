@@ -27,6 +27,7 @@ class Orchestrator:
         self._notify_callbacks: List[NotifyCallback] = []
         self._processing = False
         self._project_locks: dict[int, asyncio.Lock] = {}
+        self._chat_locks: dict[int, asyncio.Lock] = {}
 
     def on_notify(self, callback: NotifyCallback):
         """Register a notification callback (for Telegram, web, etc.)."""
@@ -108,6 +109,55 @@ class Orchestrator:
             )
             await self._notify(task_id, "failed", f"Error: {result.stderr[:500]}")
             logger.warning(f"Task {task_id} failed: {result.stderr[:200]}")
+
+    async def chat(self, chat_id: int, message: str) -> str:
+        """Send a message in a chat and get a response. Resumes Claude sessions for multi-turn."""
+        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            chat = await self.db.get_chat(chat_id)
+            if not chat:
+                raise ValueError(f"Chat {chat_id} not found")
+
+            # Store user message
+            await self.db.add_chat_message(chat_id, role="user", content=message)
+
+            # Create pending assistant message (drives UI "thinking" state)
+            pending_msg_id = await self.db.add_chat_message(
+                chat_id, role="assistant", content="", status="pending",
+            )
+
+            # Get agent config for system prompt
+            agent = await self.db.get_agent("general")
+            system_prompt = agent["system_prompt"] if agent else None
+
+            # Run Claude — use JSON format to extract session_id
+            result = await self.runner.run(
+                prompt=message,
+                oneshot=False,
+                system_prompt=system_prompt,
+                session_id=chat.get("session_id"),
+                output_format="json",
+            )
+
+            # Save session_id for future turns
+            if result.session_id:
+                await self.db.update_chat(chat_id, session_id=result.session_id)
+
+            # Update pending message with actual response
+            response = result.stdout if result.success else f"Error: {result.stderr}"
+            await self.db.update_chat_message(pending_msg_id, content=response, status="complete")
+
+            # Update chat timestamp
+            await self.db.update_chat(chat_id)
+
+            # Auto-title from first message
+            if chat["title"] == "New Chat":
+                title = message[:50].strip()
+                if len(message) > 50:
+                    title += "..."
+                await self.db.update_chat(chat_id, title=title)
+
+            return response
 
     async def process_queue(self) -> None:
         """Process pending tasks from the queue."""

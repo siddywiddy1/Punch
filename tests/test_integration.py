@@ -16,6 +16,8 @@ async def system(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     await db.initialize()
 
+    await db.set_setting("onboarding_complete", "true")
+
     runner = ClaudeRunner(claude_command="echo", max_concurrent=2)
     orchestrator = Orchestrator(db=db, runner=runner)
     scheduler = PunchScheduler(db=db, submit_fn=orchestrator.submit)
@@ -38,8 +40,8 @@ async def test_full_flow(system):
     client = system["client"]
     db = system["db"]
 
-    # 1. Dashboard loads
-    resp = await client.get("/")
+    # 1. Dashboard loads (/ now redirects to /chat)
+    resp = await client.get("/dashboard")
     assert resp.status_code == 200
     assert "Punch" in resp.text
 

@@ -288,6 +288,7 @@ def client_fixture(db):
 async def test_projects_page_loads(db):
     from httpx import AsyncClient, ASGITransport
     from punch.web.app import create_app
+    await db.set_setting("onboarding_complete", "true")
     app = create_app(db=db)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -300,6 +301,7 @@ async def test_projects_page_loads(db):
 async def test_project_detail_page_loads(db):
     from httpx import AsyncClient, ASGITransport
     from punch.web.app import create_app
+    await db.set_setting("onboarding_complete", "true")
     pid = await db.create_project("Web Test", "Testing web")
     app = create_app(db=db)
     transport = ASGITransport(app=app)

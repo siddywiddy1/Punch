@@ -14,6 +14,8 @@ _ALLOWED_COLUMNS = {
     "browser_sessions": {"url", "screenshot_path", "status"},
     "projects": {"name", "brief", "status", "updated_at"},
     "project_tasks": {"title", "agent_type", "prompt", "position", "depends_on", "status"},
+    "chats": {"title", "session_id", "is_active", "updated_at"},
+    "chat_messages": {"content", "status"},
 }
 
 
@@ -126,12 +128,33 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS chats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT 'New Chat',
+                session_id TEXT,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL REFERENCES chats(id),
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                task_id INTEGER REFERENCES tasks(id),
+                status TEXT DEFAULT 'complete',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_type);
             CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
             CREATE INDEX IF NOT EXISTS idx_conversations_task ON conversations(task_id);
             CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
             CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_chats_active ON chats(is_active);
         """)
         await self._conn.commit()
 
@@ -370,3 +393,60 @@ class Database:
             if all(d in completed_ids for d in deps):
                 ready.append(t)
         return ready
+
+    # --- Chats ---
+
+    async def create_chat(self, title: str = "New Chat") -> int:
+        return await self.execute(
+            "INSERT INTO chats (title) VALUES (?)", (title,),
+        )
+
+    async def get_chat(self, chat_id: int) -> dict | None:
+        return await self.fetch_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
+
+    async def update_chat(self, chat_id: int, **kwargs) -> None:
+        _validate_columns("chats", kwargs)
+        kwargs["updated_at"] = datetime.utcnow().isoformat()
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [chat_id]
+        await self.execute(f"UPDATE chats SET {sets} WHERE id = ?", tuple(vals))
+
+    async def list_chats(self, limit: int = 50) -> list[dict]:
+        return await self.fetch_all(
+            "SELECT * FROM chats WHERE is_active = 1 ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        )
+
+    async def delete_chat(self, chat_id: int) -> None:
+        """Soft-delete a chat by marking it inactive."""
+        await self.execute(
+            "UPDATE chats SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (chat_id,),
+        )
+
+    # --- Chat Messages ---
+
+    async def add_chat_message(self, chat_id: int, role: str, content: str,
+                               task_id: int | None = None, status: str = "complete") -> int:
+        return await self.execute(
+            "INSERT INTO chat_messages (chat_id, role, content, task_id, status) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, role, content, task_id, status),
+        )
+
+    async def get_chat_messages(self, chat_id: int) -> list[dict]:
+        return await self.fetch_all(
+            "SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY created_at",
+            (chat_id,),
+        )
+
+    async def get_latest_chat_message(self, chat_id: int) -> dict | None:
+        return await self.fetch_one(
+            "SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1",
+            (chat_id,),
+        )
+
+    async def update_chat_message(self, message_id: int, **kwargs) -> None:
+        _validate_columns("chat_messages", kwargs)
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [message_id]
+        await self.execute(f"UPDATE chat_messages SET {sets} WHERE id = ?", tuple(vals))

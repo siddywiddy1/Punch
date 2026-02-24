@@ -89,6 +89,7 @@ async def main():
             db=db,
             allowed_users=config.telegram_allowed_users,
             start_project_fn=orchestrator.start_project,
+            chat_fn=orchestrator.chat,
         )
         orchestrator.on_notify(telegram_bot.notify)
         await telegram_bot.start()

@@ -21,14 +21,17 @@ class PunchTelegramBot:
     def __init__(self, token: str, submit_fn: SubmitFn, db: Database,
                  allowed_users: list[int] | None = None,
                  execute_fn: Callable | None = None,
-                 start_project_fn: Callable | None = None):
+                 start_project_fn: Callable | None = None,
+                 chat_fn: Callable | None = None):
         self.token = token
         self.submit_fn = submit_fn
         self.execute_fn = execute_fn
         self.start_project_fn = start_project_fn
+        self.chat_fn = chat_fn
         self.db = db
         self.allowed_users = allowed_users or []
         self._app: Application | None = None
+        self._user_chats: dict[int, int] = {}  # telegram user_id -> chat_id
 
     def _parse_message(self, text: str) -> tuple[str, str]:
         """Parse agent type and prompt from message text."""
@@ -73,6 +76,45 @@ class PunchTelegramBot:
             lines.append(f"{emoji} #{t['id']} [{t['agent_type']}] {t['prompt'][:50]}")
         await update.message.reply_text("\n".join(lines))
 
+    async def _handle_chat_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle plain text messages as chat conversation."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        text = update.message.text
+        if not text:
+            return
+
+        user_id = update.effective_user.id
+
+        # Get or create a chat for this Telegram user
+        if user_id not in self._user_chats:
+            chat_id = await self.db.create_chat(title=f"Telegram Chat")
+            self._user_chats[user_id] = chat_id
+        chat_id = self._user_chats[user_id]
+
+        # Send typing indicator
+        await update.message.chat.send_action("typing")
+
+        try:
+            response = await self.chat_fn(chat_id, text)
+            # Telegram has a 4096 char limit
+            if len(response) > 4000:
+                response = response[:4000] + "\n... (truncated)"
+            await update.message.reply_text(response)
+        except Exception as e:
+            await update.message.reply_text(f"Error: {str(e)[:500]}")
+
+    async def _handle_newchat(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start a fresh chat conversation."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        user_id = update.effective_user.id
+        chat_id = await self.db.create_chat(title="Telegram Chat")
+        self._user_chats[user_id] = chat_id
+        await update.message.reply_text("New chat started. Send a message to begin.")
+
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):
             return
@@ -82,6 +124,25 @@ class PunchTelegramBot:
             return
 
         agent_type, prompt = self._parse_message(text)
+
+        # If it's an agent command, route through old task system
+        if text.startswith("/") and agent_type != "general":
+            if not prompt:
+                await update.message.reply_text("Please provide a prompt after the command.")
+                return
+            task_id = await self.submit_fn(agent_type, prompt, source="telegram")
+            await update.message.reply_text(f"Task #{task_id} created ({agent_type} agent).\nProcessing...")
+            if self.execute_fn:
+                import asyncio
+                asyncio.create_task(self._execute_and_reply(task_id, update))
+            return
+
+        # Plain text: route through chat if chat_fn is available
+        if self.chat_fn:
+            await self._handle_chat_message(update, context)
+            return
+
+        # Fallback: old task system
         if not prompt:
             await update.message.reply_text("Please provide a prompt after the command.")
             return
@@ -89,7 +150,6 @@ class PunchTelegramBot:
         task_id = await self.submit_fn(agent_type, prompt, source="telegram")
         await update.message.reply_text(f"Task #{task_id} created ({agent_type} agent).\nProcessing...")
 
-        # Execute the task immediately if execute_fn is available
         if self.execute_fn:
             import asyncio
             asyncio.create_task(self._execute_and_reply(task_id, update))
@@ -199,6 +259,7 @@ class PunchTelegramBot:
         self._app.add_handler(CommandHandler("help", self._handle_start))
         self._app.add_handler(CommandHandler("status", self._handle_status))
         self._app.add_handler(CommandHandler("project", self._handle_project))
+        self._app.add_handler(CommandHandler("newchat", self._handle_newchat))
         # Agent-specific commands
         for cmd in AGENT_COMMANDS:
             self._app.add_handler(CommandHandler(cmd, self._handle_message))

@@ -15,6 +15,7 @@ async def db(tmp_path):
 
 @pytest_asyncio.fixture
 async def client(db):
+    await db.set_setting("onboarding_complete", "true")
     app = create_app(db=db, orchestrator=None, scheduler=None)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -23,7 +24,7 @@ async def client(db):
 
 @pytest.mark.asyncio
 async def test_home_page(client):
-    resp = await client.get("/")
+    resp = await client.get("/", follow_redirects=True)
     assert resp.status_code == 200
     assert "Punch" in resp.text
 

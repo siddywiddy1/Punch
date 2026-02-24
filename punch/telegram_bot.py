@@ -20,10 +20,12 @@ AGENT_COMMANDS = {"email", "code", "research", "browser", "macos", "general"}
 class PunchTelegramBot:
     def __init__(self, token: str, submit_fn: SubmitFn, db: Database,
                  allowed_users: list[int] | None = None,
-                 execute_fn: Callable | None = None):
+                 execute_fn: Callable | None = None,
+                 start_project_fn: Callable | None = None):
         self.token = token
         self.submit_fn = submit_fn
         self.execute_fn = execute_fn
+        self.start_project_fn = start_project_fn
         self.db = db
         self.allowed_users = allowed_users or []
         self._app: Application | None = None
@@ -53,6 +55,7 @@ class PunchTelegramBot:
             "Send any message to create a task.\n"
             "Use /email, /code, /research, /browser, /macos to specify agent type.\n"
             "/status - View recent tasks\n"
+            "/project - List/manage projects\n"
             "/help - Show this message"
         )
 
@@ -107,6 +110,77 @@ class PunchTelegramBot:
         except Exception as e:
             await update.message.reply_text(f"\u274c Task #{task_id} error: {str(e)[:500]}")
 
+    async def _handle_project(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update.effective_user.id):
+            return
+
+        text = update.message.text or ""
+        parts = text.split(None, 2)
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+        if subcommand == "list":
+            projects = await self.db.list_projects(status="active", limit=10)
+            if not projects:
+                projects = await self.db.list_projects(limit=5)
+            if not projects:
+                await update.message.reply_text("No projects yet.")
+                return
+            lines = ["Projects:\n"]
+            for p in projects:
+                pts = await self.db.list_project_tasks(p["id"])
+                done = sum(1 for t in pts if t["status"] in ("completed", "failed", "skipped"))
+                emoji = {
+                    "draft": "\U0001f4dd", "active": "\u25b6",
+                    "completed": "\u2705", "archived": "\U0001f4e6",
+                }.get(p["status"], "\u2753")
+                lines.append(f"{emoji} #{p['id']} {p['name']} ({done}/{len(pts)} tasks) [{p['status']}]")
+            await update.message.reply_text("\n".join(lines))
+
+        elif subcommand == "status" and len(parts) > 2:
+            try:
+                project_id = int(parts[2])
+            except ValueError:
+                await update.message.reply_text("Usage: /project status <id>")
+                return
+            project = await self.db.get_project(project_id)
+            if not project:
+                await update.message.reply_text(f"Project #{project_id} not found.")
+                return
+            pts = await self.db.list_project_tasks(project_id)
+            lines = [f"{project['name']} [{project['status']}]\n"]
+            for pt in pts:
+                emoji = {
+                    "pending": "\u23f3", "running": "\u25b6",
+                    "completed": "\u2705", "failed": "\u274c", "skipped": "\u23ed",
+                }.get(pt["status"], "\u2753")
+                lines.append(f"  {emoji} #{pt['id']} {pt['title']} [{pt['agent_type']}]")
+            await update.message.reply_text("\n".join(lines))
+
+        elif subcommand == "start" and len(parts) > 2:
+            if not self.start_project_fn:
+                await update.message.reply_text("Project execution not available.")
+                return
+            try:
+                project_id = int(parts[2])
+            except ValueError:
+                await update.message.reply_text("Usage: /project start <id>")
+                return
+            project = await self.db.get_project(project_id)
+            if not project:
+                await update.message.reply_text(f"Project #{project_id} not found.")
+                return
+            import asyncio
+            asyncio.create_task(self.start_project_fn(project_id))
+            await update.message.reply_text(f"\u25b6 Starting project #{project_id}: {project['name']}")
+
+        else:
+            await update.message.reply_text(
+                "Usage:\n"
+                "/project - List projects\n"
+                "/project status <id> - Show project tasks\n"
+                "/project start <id> - Start a project"
+            )
+
     async def notify(self, task_id: int, status: str, message: str):
         """Send a notification to all allowed users."""
         if not self._app or not self.allowed_users:
@@ -124,6 +198,7 @@ class PunchTelegramBot:
         self._app.add_handler(CommandHandler("start", self._handle_start))
         self._app.add_handler(CommandHandler("help", self._handle_start))
         self._app.add_handler(CommandHandler("status", self._handle_status))
+        self._app.add_handler(CommandHandler("project", self._handle_project))
         # Agent-specific commands
         for cmd in AGENT_COMMANDS:
             self._app.add_handler(CommandHandler(cmd, self._handle_message))

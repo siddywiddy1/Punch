@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name if project else "Not Found" }} - Punch{% endblock %}
+{% block content %}
+{% if not project %}
+<div class="text-center py-12 text-gray-500">Project not found.</div>
+{% else %}
+<div class="space-y-6">
+    <!-- Header -->
+    <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-4">
+            <a href="/projects" class="text-gray-500 hover:text-gray-300">&larr;</a>
+            <h2 class="text-2xl font-bold">{{ project.name }}</h2>
+            <span class="text-xs px-2 py-1 rounded-full
+                {% if project.status == 'active' %}bg-yellow-900/50 text-yellow-400
+                {% elif project.status == 'completed' %}bg-green-900/50 text-green-400
+                {% elif project.status == 'archived' %}bg-gray-800 text-gray-500
+                {% else %}bg-blue-900/50 text-blue-400{% endif %}">
+                {{ project.status }}
+            </span>
+        </div>
+        <div class="flex space-x-2">
+            {% if project.status == 'draft' %}
+            <button onclick="startProject()" class="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition-colors">
+                Start Project
+            </button>
+            {% endif %}
+            {% if project.status in ['draft', 'completed'] %}
+            <button onclick="archiveProject()" class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm transition-colors">
+                Archive
+            </button>
+            {% endif %}
+            {% if project.status == 'draft' %}
+            <button onclick="deleteProject()" class="px-3 py-2 bg-red-900/50 hover:bg-red-900 text-red-400 rounded-lg text-sm transition-colors">
+                Delete
+            </button>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Brief -->
+    {% if project.brief %}
+    <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Brief</h3>
+        <pre class="text-sm text-gray-300 whitespace-pre-wrap font-sans">{{ project.brief }}</pre>
+    </div>
+    {% endif %}
+
+    <!-- Task Pipeline -->
+    <div>
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold">Tasks</h3>
+            {% if project.status in ['draft'] %}
+            <button onclick="document.getElementById('add-task-form').classList.toggle('hidden')"
+                    class="px-3 py-1 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors">
+                Add Task
+            </button>
+            {% endif %}
+        </div>
+
+        <!-- Add Task Form -->
+        <div id="add-task-form" class="hidden bg-gray-900 rounded-lg p-4 border border-gray-800 mb-4">
+            <form id="new-task-form" class="space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Title</label>
+                        <input type="text" name="title" required
+                               class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Agent</label>
+                        <select name="agent_type" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                            {% for agent in agents %}
+                            <option value="{{ agent.name }}">{{ agent.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">Prompt</label>
+                    <textarea name="prompt" rows="3"
+                              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
+                              placeholder="What should this task do?"></textarea>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Position</label>
+                        <input type="number" name="position" value="{{ project_tasks|length }}"
+                               class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1">Depends On</label>
+                        <select name="depends_on" multiple
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                            {% for pt in project_tasks %}
+                            <option value="{{ pt.id }}">#{{ pt.id }} {{ pt.title }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">
+                    Add Task
+                </button>
+            </form>
+        </div>
+
+        <!-- Task list (auto-refresh when active) -->
+        <div id="project-tasks"
+             {% if project.status == 'active' %}
+             hx-get="/htmx/projects/{{ project.id }}/tasks" hx-trigger="every 5s" hx-swap="innerHTML"
+             {% endif %}>
+            {% include "partials/project_task_list.html" %}
+        </div>
+    </div>
+</div>
+
+<script>
+async function startProject() {
+    const resp = await fetch('/api/projects/{{ project.id }}/start', {method: 'POST'});
+    if (resp.ok) location.reload();
+}
+
+async function archiveProject() {
+    const resp = await fetch('/api/projects/{{ project.id }}', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: 'archived'}),
+    });
+    if (resp.ok) location.reload();
+}
+
+async function deleteProject() {
+    if (!confirm('Delete this project and all its tasks?')) return;
+    const resp = await fetch('/api/projects/{{ project.id }}', {method: 'DELETE'});
+    if (resp.ok) window.location.href = '/projects';
+}
+
+document.getElementById('new-task-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const selectedDeps = Array.from(form.depends_on.selectedOptions).map(o => parseInt(o.value));
+    const body = {
+        title: form.title.value,
+        agent_type: form.agent_type.value,
+        prompt: form.prompt.value,
+        position: parseInt(form.position.value) || 0,
+        depends_on: selectedDeps,
+    };
+    const resp = await fetch('/api/projects/{{ project.id }}/tasks', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    });
+    if (resp.ok) location.reload();
+});
+</script>
+{% endif %}
+{% endblock %}

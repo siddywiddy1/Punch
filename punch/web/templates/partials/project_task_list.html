@@ -1,0 +1,40 @@
+{% for pt in project_tasks %}
+<div class="bg-gray-900 rounded-lg p-4 border border-gray-800 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+        <span class="text-xs text-gray-600 font-mono w-6">{{ pt.position }}</span>
+        {% if pt.status == "running" %}
+        <div class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse-dot"></div>
+        {% elif pt.status == "completed" %}
+        <div class="w-2 h-2 rounded-full bg-green-500"></div>
+        {% elif pt.status == "failed" %}
+        <div class="w-2 h-2 rounded-full bg-red-500"></div>
+        {% elif pt.status == "skipped" %}
+        <div class="w-2 h-2 rounded-full bg-gray-600"></div>
+        {% else %}
+        <div class="w-2 h-2 rounded-full bg-gray-500"></div>
+        {% endif %}
+        <span class="text-sm font-medium">{{ pt.title }}</span>
+        <span class="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-400">{{ pt.agent_type }}</span>
+        {% set deps = pt.depends_on | default('[]', true) %}
+        {% if deps != '[]' %}
+        <span class="text-xs text-gray-600">depends on: {{ deps }}</span>
+        {% endif %}
+    </div>
+    <div class="flex items-center space-x-3">
+        <span class="text-xs px-2 py-1 rounded-full
+            {% if pt.status == 'running' %}bg-yellow-900/50 text-yellow-400
+            {% elif pt.status == 'completed' %}bg-green-900/50 text-green-400
+            {% elif pt.status == 'failed' %}bg-red-900/50 text-red-400
+            {% elif pt.status == 'skipped' %}bg-gray-800 text-gray-500
+            {% else %}bg-gray-800 text-gray-400{% endif %}">
+            {{ pt.status }}
+        </span>
+        {% if pt.task_id %}
+        <a href="/tasks/{{ pt.task_id }}" class="text-xs text-punch-400 hover:text-punch-300">View Result</a>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+{% if not project_tasks %}
+<div class="text-center py-8 text-gray-600">No tasks added yet.</div>
+{% endif %}

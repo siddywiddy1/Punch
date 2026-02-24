@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Projects - Punch{% endblock %}
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h2 class="text-2xl font-bold">Projects</h2>
+        <button onclick="document.getElementById('new-project-modal').classList.toggle('hidden')"
+                class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium transition-colors">
+            New Project
+        </button>
+    </div>
+
+    <!-- Status filter tabs -->
+    <div class="flex space-x-2">
+        <a href="/projects" class="px-3 py-1 text-sm rounded-lg {% if not filter_status %}bg-gray-800 text-white{% else %}text-gray-400 hover:text-white{% endif %}">All</a>
+        {% for s in ["draft", "active", "completed", "archived"] %}
+        <a href="/projects?status={{ s }}" class="px-3 py-1 text-sm rounded-lg {% if filter_status == s %}bg-gray-800 text-white{% else %}text-gray-400 hover:text-white{% endif %}">{{ s|capitalize }}</a>
+        {% endfor %}
+    </div>
+
+    <!-- New Project Modal -->
+    <div id="new-project-modal" class="hidden bg-gray-900 rounded-lg p-6 border border-gray-800">
+        <h3 class="text-lg font-semibold mb-4">Create Project</h3>
+        <form id="create-project-form" class="space-y-4">
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Name</label>
+                <input type="text" name="name" required
+                       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
+                       placeholder="Project name">
+            </div>
+            <div>
+                <label class="block text-sm text-gray-400 mb-1">Brief</label>
+                <textarea name="brief" rows="4"
+                          class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
+                          placeholder="Describe what this project should accomplish..."></textarea>
+            </div>
+            <button type="submit" class="px-4 py-2 bg-punch-600 hover:bg-punch-700 rounded-lg text-sm font-medium">
+                Create
+            </button>
+        </form>
+    </div>
+
+    <!-- Project list -->
+    <div class="space-y-2">
+        {% for project in projects %}
+        <a href="/projects/{{ project.id }}" class="block bg-gray-900 rounded-lg p-4 border border-gray-800 hover:border-gray-700 transition-colors">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    {% if project.status == "active" %}
+                    <div class="w-2 h-2 rounded-full bg-yellow-500 animate-pulse-dot"></div>
+                    {% elif project.status == "completed" %}
+                    <div class="w-2 h-2 rounded-full bg-green-500"></div>
+                    {% elif project.status == "archived" %}
+                    <div class="w-2 h-2 rounded-full bg-gray-600"></div>
+                    {% else %}
+                    <div class="w-2 h-2 rounded-full bg-blue-500"></div>
+                    {% endif %}
+                    <span class="text-sm font-medium">{{ project.name }}</span>
+                    <span class="text-xs text-gray-500">{{ project.done_count }}/{{ project.task_count }} done</span>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <span class="text-xs px-2 py-1 rounded-full
+                        {% if project.status == 'active' %}bg-yellow-900/50 text-yellow-400
+                        {% elif project.status == 'completed' %}bg-green-900/50 text-green-400
+                        {% elif project.status == 'archived' %}bg-gray-800 text-gray-500
+                        {% else %}bg-blue-900/50 text-blue-400{% endif %}">
+                        {{ project.status }}
+                    </span>
+                    <span class="text-xs text-gray-600">{{ project.created_at }}</span>
+                </div>
+            </div>
+            {% if project.brief %}
+            <p class="text-xs text-gray-500 mt-2 line-clamp-2">{{ project.brief[:120] }}{% if project.brief|length > 120 %}...{% endif %}</p>
+            {% endif %}
+        </a>
+        {% endfor %}
+        {% if not projects %}
+        <div class="text-center py-8 text-gray-600">No projects yet. Create one above.</div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+document.getElementById('create-project-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const body = {
+        name: form.name.value,
+        brief: form.brief.value,
+    };
+    const resp = await fetch('/api/projects', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    });
+    if (resp.ok) {
+        const data = await resp.json();
+        window.location.href = '/projects/' + data.project_id;
+    }
+});
+</script>
+{% endblock %}

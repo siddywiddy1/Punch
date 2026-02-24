@@ -88,6 +88,7 @@ async def main():
             execute_fn=orchestrator.execute_task,
             db=db,
             allowed_users=config.telegram_allowed_users,
+            start_project_fn=orchestrator.start_project,
         )
         orchestrator.on_notify(telegram_bot.notify)
         await telegram_bot.start()

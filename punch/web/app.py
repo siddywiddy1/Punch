@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -103,6 +104,29 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         settings = await db.list_settings()
         return templates.TemplateResponse("settings.html", {
             "request": request, "settings": settings, "page": "settings",
+        })
+
+    @app.get("/projects", response_class=HTMLResponse)
+    async def projects_page(request: Request, status: str = None):
+        projects = await db.list_projects(status=status)
+        # Attach task counts to each project
+        for p in projects:
+            pts = await db.list_project_tasks(p["id"])
+            p["task_count"] = len(pts)
+            p["done_count"] = sum(1 for t in pts if t["status"] in ("completed", "failed", "skipped"))
+        return templates.TemplateResponse("projects.html", {
+            "request": request, "projects": projects, "page": "projects",
+            "filter_status": status,
+        })
+
+    @app.get("/projects/{project_id}", response_class=HTMLResponse)
+    async def project_detail_page(request: Request, project_id: int):
+        project = await db.get_project(project_id)
+        project_tasks = await db.list_project_tasks(project_id) if project else []
+        agents = await db.list_agents()
+        return templates.TemplateResponse("project_detail.html", {
+            "request": request, "project": project, "project_tasks": project_tasks,
+            "agents": agents, "page": "projects",
         })
 
     @app.get("/logs", response_class=HTMLResponse)
@@ -226,5 +250,147 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         body = await request.json()
         await db.set_setting(key, body["value"])
         return {"ok": True}
+
+    # --- Project API ---
+
+    _VALID_PROJECT_STATUSES = {"draft", "active", "completed", "archived"}
+    _VALID_PT_STATUSES = {"pending", "running", "completed", "failed", "skipped"}
+    _MAX_BRIEF_SIZE = 50_000
+    _MAX_PROMPT_SIZE = 20_000
+
+    def _validate_depends_on(deps) -> list[int] | None:
+        """Validate depends_on is a list of integers. Returns None on invalid input."""
+        if not isinstance(deps, list):
+            return None
+        if not all(isinstance(d, int) for d in deps):
+            return None
+        return deps
+
+    @app.post("/api/projects")
+    async def api_create_project(request: Request):
+        body = await request.json()
+        name = body.get("name")
+        if not name or not isinstance(name, str):
+            return JSONResponse({"error": "name is required"}, status_code=400)
+        brief = body.get("brief", "")
+        if len(brief) > _MAX_BRIEF_SIZE:
+            return JSONResponse({"error": f"brief exceeds {_MAX_BRIEF_SIZE} chars"}, status_code=400)
+        project_id = await db.create_project(name=name, brief=brief)
+        # Optionally create inline tasks
+        for i, t in enumerate(body.get("tasks", [])):
+            raw_deps = t.get("depends_on", [])
+            deps = _validate_depends_on(raw_deps)
+            if deps is None:
+                return JSONResponse({"error": "depends_on must be a list of integers"}, status_code=400)
+            prompt = t.get("prompt", "")
+            if len(prompt) > _MAX_PROMPT_SIZE:
+                return JSONResponse({"error": f"task prompt exceeds {_MAX_PROMPT_SIZE} chars"}, status_code=400)
+            await db.create_project_task(
+                project_id=project_id, title=t.get("title", f"Task {i+1}"),
+                agent_type=t.get("agent_type", "general"),
+                prompt=prompt, position=t.get("position", i),
+                depends_on=json.dumps(deps),
+            )
+        return {"project_id": project_id}
+
+    @app.get("/api/projects")
+    async def api_list_projects(status: str = None, limit: int = 50):
+        return await db.list_projects(status=status, limit=limit)
+
+    @app.get("/api/projects/{project_id}")
+    async def api_get_project(project_id: int):
+        project = await db.get_project(project_id)
+        if not project:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        tasks = await db.list_project_tasks(project_id)
+        return {"project": project, "tasks": tasks}
+
+    @app.put("/api/projects/{project_id}")
+    async def api_update_project(project_id: int, request: Request):
+        body = await request.json()
+        if "status" in body and body["status"] not in _VALID_PROJECT_STATUSES:
+            return JSONResponse({"error": f"Invalid status. Must be one of: {_VALID_PROJECT_STATUSES}"}, status_code=400)
+        if "brief" in body and len(body.get("brief", "")) > _MAX_BRIEF_SIZE:
+            return JSONResponse({"error": f"brief exceeds {_MAX_BRIEF_SIZE} chars"}, status_code=400)
+        await db.update_project(project_id, **body)
+        return {"ok": True}
+
+    @app.delete("/api/projects/{project_id}")
+    async def api_delete_project(project_id: int):
+        await db.delete_project(project_id)
+        return {"ok": True}
+
+    @app.post("/api/projects/{project_id}/start")
+    async def api_start_project(project_id: int):
+        if not orchestrator:
+            return JSONResponse({"error": "No orchestrator"}, status_code=500)
+        project = await db.get_project(project_id)
+        if not project:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        if project["status"] != "draft":
+            return JSONResponse({"error": f"Cannot start project with status '{project['status']}'"}, status_code=400)
+        await orchestrator.start_project(project_id)
+        return {"ok": True}
+
+    @app.post("/api/projects/{project_id}/tasks")
+    async def api_add_project_task(project_id: int, request: Request):
+        body = await request.json()
+        title = body.get("title")
+        if not title or not isinstance(title, str):
+            return JSONResponse({"error": "title is required"}, status_code=400)
+        raw_deps = body.get("depends_on", [])
+        deps = _validate_depends_on(raw_deps)
+        if deps is None:
+            return JSONResponse({"error": "depends_on must be a list of integers"}, status_code=400)
+        prompt = body.get("prompt", "")
+        if len(prompt) > _MAX_PROMPT_SIZE:
+            return JSONResponse({"error": f"prompt exceeds {_MAX_PROMPT_SIZE} chars"}, status_code=400)
+        # Validate deps reference tasks in the same project
+        if deps:
+            existing = await db.list_project_tasks(project_id)
+            existing_ids = {t["id"] for t in existing}
+            invalid_deps = [d for d in deps if d not in existing_ids]
+            if invalid_deps:
+                return JSONResponse({"error": f"depends_on references non-existent tasks: {invalid_deps}"}, status_code=400)
+        pt_id = await db.create_project_task(
+            project_id=project_id, title=title,
+            agent_type=body.get("agent_type", "general"),
+            prompt=prompt, position=body.get("position", 0),
+            depends_on=json.dumps(deps),
+        )
+        return {"project_task_id": pt_id}
+
+    @app.put("/api/project-tasks/{pt_id}")
+    async def api_update_project_task(pt_id: int, request: Request):
+        body = await request.json()
+        if "status" in body and body["status"] not in _VALID_PT_STATUSES:
+            return JSONResponse({"error": f"Invalid status. Must be one of: {_VALID_PT_STATUSES}"}, status_code=400)
+        if "prompt" in body and len(body.get("prompt", "")) > _MAX_PROMPT_SIZE:
+            return JSONResponse({"error": f"prompt exceeds {_MAX_PROMPT_SIZE} chars"}, status_code=400)
+        if "depends_on" in body:
+            if isinstance(body["depends_on"], list):
+                deps = _validate_depends_on(body["depends_on"])
+                if deps is None:
+                    return JSONResponse({"error": "depends_on must be a list of integers"}, status_code=400)
+                body["depends_on"] = json.dumps(deps)
+            else:
+                return JSONResponse({"error": "depends_on must be a list"}, status_code=400)
+        await db.update_project_task(pt_id, **body)
+        return {"ok": True}
+
+    @app.delete("/api/project-tasks/{pt_id}")
+    async def api_delete_project_task(pt_id: int):
+        await db.delete_project_task(pt_id)
+        return {"ok": True}
+
+    # --- Project HTMX ---
+
+    @app.get("/htmx/projects/{project_id}/tasks", response_class=HTMLResponse)
+    async def htmx_project_tasks(request: Request, project_id: int):
+        project = await db.get_project(project_id)
+        project_tasks = await db.list_project_tasks(project_id) if project else []
+        return templates.TemplateResponse("partials/project_task_list.html", {
+            "request": request, "project": project, "project_tasks": project_tasks,
+        })
 
     return app

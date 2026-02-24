@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import aiosqlite
 from datetime import datetime
 from typing import Any
@@ -11,6 +12,8 @@ _ALLOWED_COLUMNS = {
     "cron_jobs": {"name", "schedule", "agent_type", "prompt", "enabled", "last_run", "next_run"},
     "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent", "allowed_tools"},
     "browser_sessions": {"url", "screenshot_path", "status"},
+    "projects": {"name", "brief", "status", "updated_at"},
+    "project_tasks": {"title", "agent_type", "prompt", "position", "depends_on", "status"},
 }
 
 
@@ -101,10 +104,34 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                brief TEXT NOT NULL,
+                status TEXT DEFAULT 'draft',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS project_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES projects(id),
+                task_id INTEGER UNIQUE REFERENCES tasks(id),
+                title TEXT NOT NULL,
+                agent_type TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                position INTEGER DEFAULT 0,
+                depends_on TEXT DEFAULT '[]',
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
             CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_type);
             CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
             CREATE INDEX IF NOT EXISTS idx_conversations_task ON conversations(task_id);
+            CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+            CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id);
         """)
         await self._conn.commit()
 
@@ -262,3 +289,84 @@ class Database:
                 (status,),
             )
         return await self.fetch_all("SELECT * FROM browser_sessions ORDER BY created_at DESC")
+
+    # --- Projects ---
+
+    async def create_project(self, name: str, brief: str, status: str = "draft") -> int:
+        return await self.execute(
+            "INSERT INTO projects (name, brief, status) VALUES (?, ?, ?)",
+            (name, brief, status),
+        )
+
+    async def get_project(self, project_id: int) -> dict | None:
+        return await self.fetch_one("SELECT * FROM projects WHERE id = ?", (project_id,))
+
+    async def update_project(self, project_id: int, **kwargs) -> None:
+        _validate_columns("projects", kwargs)
+        kwargs["updated_at"] = datetime.utcnow().isoformat()
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [project_id]
+        await self.execute(f"UPDATE projects SET {sets} WHERE id = ?", tuple(vals))
+
+    async def list_projects(self, status: str | None = None, limit: int = 50) -> list[dict]:
+        sql = "SELECT * FROM projects WHERE 1=1"
+        params: list = []
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        return await self.fetch_all(sql, tuple(params))
+
+    async def delete_project(self, project_id: int) -> None:
+        await self.execute("DELETE FROM project_tasks WHERE project_id = ?", (project_id,))
+        await self.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+    # --- Project Tasks ---
+
+    async def create_project_task(self, project_id: int, title: str, agent_type: str,
+                                  prompt: str, position: int = 0,
+                                  depends_on: str = "[]") -> int:
+        return await self.execute(
+            "INSERT INTO project_tasks (project_id, title, agent_type, prompt, position, depends_on) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (project_id, title, agent_type, prompt, position, depends_on),
+        )
+
+    async def get_project_task(self, pt_id: int) -> dict | None:
+        return await self.fetch_one("SELECT * FROM project_tasks WHERE id = ?", (pt_id,))
+
+    async def update_project_task(self, pt_id: int, **kwargs) -> None:
+        _validate_columns("project_tasks", kwargs)
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [pt_id]
+        await self.execute(f"UPDATE project_tasks SET {sets} WHERE id = ?", tuple(vals))
+
+    async def link_project_task(self, pt_id: int, task_id: int, status: str = "running") -> None:
+        """Internal method to link a project task to a real task. Not exposed via API."""
+        await self.execute(
+            "UPDATE project_tasks SET task_id = ?, status = ? WHERE id = ?",
+            (task_id, status, pt_id),
+        )
+
+    async def list_project_tasks(self, project_id: int) -> list[dict]:
+        return await self.fetch_all(
+            "SELECT * FROM project_tasks WHERE project_id = ? ORDER BY position, id",
+            (project_id,),
+        )
+
+    async def delete_project_task(self, pt_id: int) -> None:
+        await self.execute("DELETE FROM project_tasks WHERE id = ?", (pt_id,))
+
+    async def get_ready_project_tasks(self, project_id: int) -> list[dict]:
+        """Get pending project tasks whose dependencies are all completed."""
+        tasks = await self.list_project_tasks(project_id)
+        completed_ids = {t["id"] for t in tasks if t["status"] == "completed"}
+        ready = []
+        for t in tasks:
+            if t["status"] != "pending":
+                continue
+            deps = json.loads(t["depends_on"]) if t["depends_on"] else []
+            if all(d in completed_ids for d in deps):
+                ready.append(t)
+        return ready

@@ -17,7 +17,7 @@ TEMPLATE_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(db: Database, orchestrator=None, scheduler=None) -> FastAPI:
+def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | None = None) -> FastAPI:
     app = FastAPI(title="Punch", docs_url="/api/docs")
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
@@ -25,6 +25,27 @@ def create_app(db: Database, orchestrator=None, scheduler=None) -> FastAPI:
     app.state.db = db
     app.state.orchestrator = orchestrator
     app.state.scheduler = scheduler
+
+    # API key authentication middleware
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        # Skip auth if no API key configured (localhost-only mode)
+        if api_key:
+            # Allow static files without auth
+            if not request.url.path.startswith("/static"):
+                # Check header, query param, or cookie
+                provided = (
+                    request.headers.get("X-API-Key")
+                    or request.query_params.get("api_key")
+                    or request.cookies.get("punch_api_key")
+                )
+                if provided != api_key:
+                    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        response = await call_next(request)
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        return response
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

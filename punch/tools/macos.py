@@ -6,6 +6,11 @@ import logging
 logger = logging.getLogger("punch.tools.macos")
 
 
+def _escape_applescript(s: str) -> str:
+    """Escape a string for safe inclusion in AppleScript double-quoted strings."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 async def run_applescript(script: str, timeout: int = 30) -> str:
     proc = await asyncio.create_subprocess_exec(
         "osascript", "-e", script,
@@ -19,7 +24,8 @@ async def run_applescript(script: str, timeout: int = 30) -> str:
 
 
 async def notify(title: str, message: str) -> None:
-    script = f'display notification "{message}" with title "{title}"'
+    t, m = _escape_applescript(title), _escape_applescript(message)
+    script = f'display notification "{m}" with title "{t}"'
     await run_applescript(script)
 
 
@@ -30,11 +36,13 @@ async def get_frontmost_app() -> str:
 
 
 async def open_app(app_name: str) -> None:
-    await run_applescript(f'tell application "{app_name}" to activate')
+    name = _escape_applescript(app_name)
+    await run_applescript(f'tell application "{name}" to activate')
 
 
 async def open_url(url: str) -> None:
-    await run_applescript(f'open location "{url}"')
+    u = _escape_applescript(url)
+    await run_applescript(f'open location "{u}"')
 
 
 async def get_clipboard() -> str:
@@ -42,7 +50,8 @@ async def get_clipboard() -> str:
 
 
 async def set_clipboard(text: str) -> None:
-    await run_applescript(f'set the clipboard to "{text}"')
+    t = _escape_applescript(text)
+    await run_applescript(f'set the clipboard to "{t}"')
 
 
 async def list_running_apps() -> list[str]:
@@ -53,8 +62,10 @@ async def list_running_apps() -> list[str]:
 
 
 async def keystroke(text: str, app: str | None = None) -> None:
+    t = _escape_applescript(text)
     if app:
-        script = f'tell application "{app}" to activate\ndelay 0.5\ntell application "System Events" to keystroke "{text}"'
+        a = _escape_applescript(app)
+        script = f'tell application "{a}" to activate\ndelay 0.5\ntell application "System Events" to keystroke "{t}"'
     else:
-        script = f'tell application "System Events" to keystroke "{text}"'
+        script = f'tell application "System Events" to keystroke "{t}"'
     await run_applescript(script)

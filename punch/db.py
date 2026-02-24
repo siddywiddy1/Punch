@@ -5,6 +5,22 @@ from datetime import datetime
 from typing import Any
 
 
+# Column allowlists for safe dynamic updates
+_ALLOWED_COLUMNS = {
+    "tasks": {"status", "result", "error", "session_id", "working_dir", "started_at", "completed_at", "priority"},
+    "cron_jobs": {"name", "schedule", "agent_type", "prompt", "enabled", "last_run", "next_run"},
+    "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent"},
+    "browser_sessions": {"url", "screenshot_path", "status"},
+}
+
+
+def _validate_columns(table: str, kwargs: dict) -> None:
+    allowed = _ALLOWED_COLUMNS.get(table, set())
+    invalid = set(kwargs.keys()) - allowed
+    if invalid:
+        raise ValueError(f"Invalid columns for {table}: {invalid}")
+
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -121,6 +137,7 @@ class Database:
         return await self.fetch_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
 
     async def update_task(self, task_id: int, **kwargs) -> None:
+        _validate_columns("tasks", kwargs)
         if "status" in kwargs:
             if kwargs["status"] == "running":
                 kwargs.setdefault("started_at", datetime.utcnow().isoformat())
@@ -161,6 +178,7 @@ class Database:
         return await self.fetch_one("SELECT * FROM cron_jobs WHERE id = ?", (job_id,))
 
     async def update_cron_job(self, job_id: int, **kwargs) -> None:
+        _validate_columns("cron_jobs", kwargs)
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [job_id]
         await self.execute(f"UPDATE cron_jobs SET {sets} WHERE id = ?", tuple(vals))
@@ -184,6 +202,7 @@ class Database:
         return await self.fetch_one("SELECT * FROM agents WHERE name = ?", (name,))
 
     async def update_agent(self, name: str, **kwargs) -> None:
+        _validate_columns("agents", kwargs)
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [name]
         await self.execute(f"UPDATE agents SET {sets} WHERE name = ?", tuple(vals))
@@ -230,6 +249,7 @@ class Database:
         )
 
     async def update_browser_session(self, session_id: int, **kwargs) -> None:
+        _validate_columns("browser_sessions", kwargs)
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [session_id]
         await self.execute(f"UPDATE browser_sessions SET {sets} WHERE id = ?", tuple(vals))

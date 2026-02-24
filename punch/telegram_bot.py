@@ -39,7 +39,10 @@ class PunchTelegramBot:
         return "general", text
 
     def _is_authorized(self, user_id: int) -> bool:
-        return not self.allowed_users or user_id in self.allowed_users
+        if not self.allowed_users:
+            logger.warning("No allowed users configured — denying all Telegram access")
+            return False
+        return user_id in self.allowed_users
 
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):

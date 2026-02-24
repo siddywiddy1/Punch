@@ -6,7 +6,7 @@ from punch.config import PunchConfig
 def test_config_defaults():
     config = PunchConfig()
     assert config.db_path == "punch.db"
-    assert config.web_host == "0.0.0.0"
+    assert config.web_host == "127.0.0.1"
     assert config.web_port == 8080
     assert config.max_concurrent_tasks == 4
     assert config.claude_command == "claude"

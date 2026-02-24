@@ -91,7 +91,7 @@ async def main():
     from punch.web.app import create_app
     import uvicorn
 
-    app = create_app(db=db, orchestrator=orchestrator, scheduler=scheduler)
+    app = create_app(db=db, orchestrator=orchestrator, scheduler=scheduler, api_key=config.api_key)
 
     uvicorn_config = uvicorn.Config(
         app=app,

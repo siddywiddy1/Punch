@@ -11,8 +11,11 @@ class PunchConfig:
     db_path: str = field(default_factory=lambda: os.getenv("PUNCH_DB_PATH", "punch.db"))
 
     # Web server
-    web_host: str = field(default_factory=lambda: os.getenv("PUNCH_WEB_HOST", "0.0.0.0"))
+    web_host: str = field(default_factory=lambda: os.getenv("PUNCH_WEB_HOST", "127.0.0.1"))
     web_port: int = field(default_factory=lambda: int(os.getenv("PUNCH_WEB_PORT", "8080")))
+
+    # API key for dashboard/API authentication (required for non-localhost access)
+    api_key: str | None = field(default_factory=lambda: os.getenv("PUNCH_API_KEY"))
 
     # Claude Code
     claude_command: str = field(default_factory=lambda: os.getenv("PUNCH_CLAUDE_CMD", "claude"))

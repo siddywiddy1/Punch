@@ -27,6 +27,9 @@ class PunchConfig:
         int(x) for x in os.getenv("PUNCH_TELEGRAM_USERS", "").split(",") if x.strip()
     ])
 
+    # Browser — CDP URL for connecting to your real Chrome (launch Chrome with --remote-debugging-port=9222)
+    browser_cdp_url: str | None = field(default_factory=lambda: os.getenv("PUNCH_BROWSER_CDP_URL"))
+
     # Data directories
     data_dir: str = field(default_factory=lambda: os.getenv("PUNCH_DATA_DIR", "data"))
     screenshots_dir: str = field(default_factory=lambda: os.getenv("PUNCH_SCREENSHOTS_DIR", "data/screenshots"))

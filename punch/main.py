@@ -70,7 +70,7 @@ async def main():
     orchestrator = Orchestrator(db=db, runner=runner)
 
     # Browser manager
-    browser = BrowserManager(screenshots_dir=config.screenshots_dir)
+    browser = BrowserManager(screenshots_dir=config.screenshots_dir, cdp_url=config.browser_cdp_url)
 
     # Scheduler
     scheduler = PunchScheduler(db=db, submit_fn=orchestrator.submit)

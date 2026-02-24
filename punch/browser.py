@@ -9,12 +9,17 @@ from punch.sanitizer import sanitize_and_frame
 
 logger = logging.getLogger("punch.browser")
 
+# Default CDP endpoint when Chrome is launched with --remote-debugging-port=9222
+_DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+
 
 class BrowserManager:
-    def __init__(self, screenshots_dir: str = "data/screenshots"):
+    def __init__(self, screenshots_dir: str = "data/screenshots", cdp_url: str | None = None):
         self.screenshots_dir = screenshots_dir
+        self.cdp_url = cdp_url
         self._browser = None
         self._playwright = None
+        self._mode = None  # "cdp" or "headless"
 
     @property
     def is_running(self) -> bool:
@@ -24,13 +29,30 @@ class BrowserManager:
         from playwright.async_api import async_playwright
         Path(self.screenshots_dir).mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
+
+        # Try CDP connection first if configured
+        if self.cdp_url:
+            try:
+                self._browser = await self._playwright.chromium.connect_over_cdp(self.cdp_url)
+                self._mode = "cdp"
+                logger.info(f"Connected to Chrome via CDP at {self.cdp_url}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to connect to Chrome via CDP ({self.cdp_url}): {e}")
+                logger.info("Falling back to headless Chromium")
+
         self._browser = await self._playwright.chromium.launch(headless=True)
+        self._mode = "headless"
         logger.info("Browser started (headless Chromium)")
 
     async def stop(self):
         if self._browser:
-            await self._browser.close()
-            self._browser = None
+            if self._mode == "cdp":
+                # Don't close the user's actual Chrome — just disconnect
+                self._browser = None
+            else:
+                await self._browser.close()
+                self._browser = None
         if self._playwright:
             await self._playwright.stop()
             self._playwright = None
@@ -39,6 +61,16 @@ class BrowserManager:
     async def new_page(self):
         if not self._browser:
             await self.start()
+
+        if self._mode == "cdp":
+            # Use existing browser context (user's real Chrome profile)
+            contexts = self._browser.contexts
+            if contexts:
+                return await contexts[0].new_page()
+            # Fallback: create a new context
+            context = await self._browser.new_context()
+            return await context.new_page()
+
         context = await self._browser.new_context(
             viewport={"width": 1280, "height": 720},
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",

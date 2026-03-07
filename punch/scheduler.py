@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Callable, Awaitable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -56,7 +57,7 @@ class PunchScheduler:
         logger.info(f"Cron trigger: {job['name']} (agent={job['agent_type']})")
         try:
             task_id = await self.submit_fn(job["agent_type"], job["prompt"], source="cron")
-            await self.db.update_cron_job(cron_job_id, last_run="datetime('now')")
+            await self.db.update_cron_job(cron_job_id, last_run=datetime.now(timezone.utc).isoformat())
             logger.info(f"Cron job {job['name']} created task {task_id}")
         except Exception as e:
             logger.error(f"Cron job {job['name']} failed: {e}")

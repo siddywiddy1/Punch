@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Callable, Awaitable
 
@@ -22,16 +23,21 @@ class PunchTelegramBot:
                  allowed_users: list[int] | None = None,
                  execute_fn: Callable | None = None,
                  start_project_fn: Callable | None = None,
-                 chat_fn: Callable | None = None):
+                 chat_fn: Callable | None = None,
+                 estop_fn: Callable | None = None,
+                 resume_fn: Callable | None = None):
         self.token = token
         self.submit_fn = submit_fn
         self.execute_fn = execute_fn
         self.start_project_fn = start_project_fn
         self.chat_fn = chat_fn
+        self.estop_fn = estop_fn
+        self.resume_fn = resume_fn
         self.db = db
         self.allowed_users = allowed_users or []
         self._app: Application | None = None
         self._user_chats: dict[int, int] = {}  # telegram user_id -> chat_id
+        self._pending_approvals: dict[int, asyncio.Future] = {}  # task_id -> Future[bool]
 
     def _parse_message(self, text: str) -> tuple[str, str]:
         """Parse agent type and prompt from message text."""
@@ -55,10 +61,13 @@ class PunchTelegramBot:
             return
         await update.message.reply_text(
             "Punch AI Assistant\n\n"
-            "Send any message to create a task.\n"
-            "Use /email, /code, /research, /browser, /macos to specify agent type.\n"
+            "Send any message to chat.\n"
+            "Use /email, /code, /research, /browser, /macos for agent tasks.\n"
             "/status - View recent tasks\n"
             "/project - List/manage projects\n"
+            "/newchat - Start a fresh chat\n"
+            "/stop - Emergency stop all tasks\n"
+            "/resume - Resume after stop\n"
             "/help - Show this message"
         )
 
@@ -115,6 +124,99 @@ class PunchTelegramBot:
         self._user_chats[user_id] = chat_id
         await update.message.reply_text("New chat started. Send a message to begin.")
 
+    async def _handle_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Emergency stop all tasks."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if not self.estop_fn:
+            await update.message.reply_text("Emergency stop not available.")
+            return
+        result = await self.estop_fn()
+        await update.message.reply_text(
+            f"\u26d4 Emergency stop activated.\n"
+            f"Cancelled {result['cancelled']} tasks.\n"
+            f"Use /resume to restart processing."
+        )
+
+    async def _handle_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Resume processing after emergency stop."""
+        if not self._is_authorized(update.effective_user.id):
+            return
+        if not self.resume_fn:
+            await update.message.reply_text("Resume not available.")
+            return
+        self.resume_fn()
+        await update.message.reply_text("\u2705 Processing resumed.")
+
+    async def request_approval(self, task_id: int, agent_type: str, prompt: str) -> bool:
+        """Send approval request to all allowed users and wait for response."""
+        if not self._app or not self.allowed_users:
+            return True  # auto-approve if no Telegram
+
+        future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+        self._pending_approvals[task_id] = future
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("\u2705 Approve", callback_data=f"approve:{task_id}"),
+                InlineKeyboardButton("\u274c Deny", callback_data=f"deny:{task_id}"),
+            ]
+        ])
+        text = (
+            f"\u26a0\ufe0f Approval required\n\n"
+            f"Agent: {agent_type}\n"
+            f"Task #{task_id}: {prompt}\n\n"
+            f"Approve this task?"
+        )
+        for user_id in self.allowed_users:
+            try:
+                await self._app.bot.send_message(
+                    chat_id=user_id, text=text, reply_markup=keyboard,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send approval request to {user_id}: {e}")
+
+        try:
+            return await asyncio.wait_for(future, timeout=300)  # 5 min timeout
+        except asyncio.TimeoutError:
+            logger.warning(f"Approval timeout for task {task_id}")
+            return False
+        finally:
+            self._pending_approvals.pop(task_id, None)
+
+    async def _handle_approval_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard approval/deny callbacks."""
+        query = update.callback_query
+        if not self._is_authorized(query.from_user.id):
+            await query.answer("Unauthorized")
+            return
+
+        data = query.data
+        if not data or ":" not in data:
+            await query.answer("Invalid")
+            return
+
+        action, task_id_str = data.split(":", 1)
+        try:
+            task_id = int(task_id_str)
+        except ValueError:
+            await query.answer("Invalid task ID")
+            return
+
+        future = self._pending_approvals.get(task_id)
+        if not future or future.done():
+            await query.answer("Approval already processed")
+            return
+
+        approved = action == "approve"
+        future.set_result(approved)
+
+        emoji = "\u2705" if approved else "\u274c"
+        await query.answer(f"Task #{task_id} {'approved' if approved else 'denied'}")
+        await query.edit_message_text(
+            f"{emoji} Task #{task_id} {'approved' if approved else 'denied'} by {query.from_user.first_name}"
+        )
+
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update.effective_user.id):
             return
@@ -133,7 +235,6 @@ class PunchTelegramBot:
             task_id = await self.submit_fn(agent_type, prompt, source="telegram")
             await update.message.reply_text(f"Task #{task_id} created ({agent_type} agent).\nProcessing...")
             if self.execute_fn:
-                import asyncio
                 asyncio.create_task(self._execute_and_reply(task_id, update))
             return
 
@@ -229,7 +330,6 @@ class PunchTelegramBot:
             if not project:
                 await update.message.reply_text(f"Project #{project_id} not found.")
                 return
-            import asyncio
             asyncio.create_task(self.start_project_fn(project_id))
             await update.message.reply_text(f"\u25b6 Starting project #{project_id}: {project['name']}")
 
@@ -260,6 +360,10 @@ class PunchTelegramBot:
         self._app.add_handler(CommandHandler("status", self._handle_status))
         self._app.add_handler(CommandHandler("project", self._handle_project))
         self._app.add_handler(CommandHandler("newchat", self._handle_newchat))
+        self._app.add_handler(CommandHandler("stop", self._handle_stop))
+        self._app.add_handler(CommandHandler("resume", self._handle_resume))
+        # Inline keyboard callbacks (approval flow)
+        self._app.add_handler(CallbackQueryHandler(self._handle_approval_callback))
         # Agent-specific commands
         for cmd in AGENT_COMMANDS:
             self._app.add_handler(CommandHandler(cmd, self._handle_message))

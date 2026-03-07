@@ -30,10 +30,19 @@
     {% else %}
     <div class="flex justify-start">
         <div class="max-w-[70%] bg-gray-800 border border-gray-700 rounded-lg px-4 py-3">
-            <p class="text-sm whitespace-pre-wrap">{{ msg.content }}</p>
+            <div class="text-sm markdown-body markdown-content">{{ msg.content }}</div>
         </div>
     </div>
     {% endif %}
     {% endfor %}
 </div>
+<script>
+    // Render markdown in assistant messages
+    if (typeof marked !== 'undefined') {
+        document.querySelectorAll('.markdown-content').forEach(el => {
+            const raw = el.textContent;
+            el.innerHTML = marked.parse(raw);
+        });
+    }
+</script>
 {% endif %}

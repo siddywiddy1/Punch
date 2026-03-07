@@ -6,12 +6,12 @@
     <string>com.punch.assistant</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/siddy/Documents/Code/Punch/venv/bin/python</string>
+        <string>__PUNCH_VENV__/bin/python</string>
         <string>-m</string>
         <string>punch.main</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/siddy/Documents/Code/Punch</string>
+    <string>__PUNCH_DIR__</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -22,8 +22,8 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/siddy/Documents/Code/Punch/data/punch.log</string>
+    <string>__PUNCH_DIR__/data/punch.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/siddy/Documents/Code/Punch/data/punch_error.log</string>
+    <string>__PUNCH_DIR__/data/punch_error.log</string>
 </dict>
 </plist>

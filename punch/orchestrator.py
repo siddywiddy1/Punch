@@ -7,31 +7,34 @@ from typing import Callable, Awaitable, List
 
 from punch.db import Database
 from punch.runner import ClaudeRunner
+from punch.memory import Memory
 
 logger = logging.getLogger("punch.orchestrator")
 
 # Callbacks for notifications (set by telegram bot, web, etc.)
 NotifyCallback = Callable[[int, str, str], Awaitable[None]]  # task_id, status, message
-
-# Keywords that indicate a multi-step task (not oneshot)
-_MULTI_STEP_KEYWORDS = [
-    "fix", "implement", "build", "deploy", "commit", "create", "write", "refactor",
-    "update", "modify", "change", "add", "remove", "delete", "install",
-]
-
+ApprovalCallback = Callable[[int, str, str], Awaitable[bool]]  # task_id, agent_type, prompt -> approved
 
 class Orchestrator:
-    def __init__(self, db: Database, runner: ClaudeRunner):
+    def __init__(self, db: Database, runner: ClaudeRunner, memory: Memory | None = None):
         self.db = db
         self.runner = runner
+        self.memory = memory or Memory(db)
         self._notify_callbacks: List[NotifyCallback] = []
+        self._approval_callback: ApprovalCallback | None = None
         self._processing = False
+        self._stopped = False  # emergency stop flag
+        self._running_tasks: set[int] = set()  # track running task IDs
         self._project_locks: dict[int, asyncio.Lock] = {}
         self._chat_locks: dict[int, asyncio.Lock] = {}
 
     def on_notify(self, callback: NotifyCallback):
         """Register a notification callback (for Telegram, web, etc.)."""
         self._notify_callbacks.append(callback)
+
+    def on_approval(self, callback: ApprovalCallback):
+        """Register an approval callback (for tool approval via Telegram)."""
+        self._approval_callback = callback
 
     async def _notify(self, task_id: int, status: str, message: str):
         """Send notifications to all registered callbacks."""
@@ -40,6 +43,39 @@ class Orchestrator:
                 await cb(task_id, status, message)
             except Exception as e:
                 logger.error(f"Notification callback error: {e}")
+
+    # --- Emergency Stop ---
+
+    async def estop(self) -> dict:
+        """Emergency stop: cancel all pending/running tasks and pause processing."""
+        self._stopped = True
+        cancelled = 0
+
+        # Cancel pending tasks
+        pending = await self.db.get_pending_tasks()
+        for task in pending:
+            await self.db.update_task(task["id"], status="failed", error="Emergency stop")
+            cancelled += 1
+
+        # Cancel running tasks
+        running = await self.db.list_tasks(status="running")
+        for task in running:
+            await self.db.update_task(task["id"], status="failed", error="Emergency stop")
+            cancelled += 1
+
+        self._running_tasks.clear()
+        logger.warning(f"EMERGENCY STOP: cancelled {cancelled} tasks")
+        await self._notify(0, "estop", f"Emergency stop activated. {cancelled} tasks cancelled.")
+        return {"cancelled": cancelled}
+
+    def resume(self):
+        """Resume processing after emergency stop."""
+        self._stopped = False
+        logger.info("Processing resumed after emergency stop")
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stopped
 
     async def submit(self, agent_type: str, prompt: str, priority: int = 0,
                      working_dir: str | None = None, source: str = "manual") -> int:
@@ -53,6 +89,10 @@ class Orchestrator:
 
     async def execute_task(self, task_id: int) -> None:
         """Execute a single task: fetch config, run, update status, notify."""
+        if self._stopped:
+            await self.db.update_task(task_id, status="failed", error="System is stopped")
+            return
+
         task = await self.db.get_task(task_id)
         if not task:
             logger.error(f"Task {task_id} not found")
@@ -72,25 +112,42 @@ class Orchestrator:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # Tool approval: if agent requires approval, ask before executing
+        if agent and agent.get("require_approval") and self._approval_callback:
+            approved = await self._approval_callback(
+                task_id, task["agent_type"], task["prompt"][:200],
+            )
+            if not approved:
+                await self.db.update_task(task_id, status="failed", error="Approval denied")
+                await self._notify(task_id, "failed", "Task denied: approval not granted")
+                logger.info(f"Task {task_id} denied by approval")
+                return
+
+        # Inject memory context into prompt
+        memory_context = await self.memory.get_context(task["prompt"][:100])
+        augmented_prompt = task["prompt"]
+        if memory_context:
+            augmented_prompt = f"{memory_context}\n\n---\n\n{task['prompt']}"
+
         # Mark as running
+        self._running_tasks.add(task_id)
         await self.db.update_task(task_id, status="running")
         await self._notify(task_id, "running", f"Starting: {task['prompt'][:100]}")
 
         # Log the prompt
         await self.db.add_conversation(task_id, role="user", content=task["prompt"])
 
-        # Determine if one-shot or multi-step based on prompt keywords
-        oneshot = not any(kw in task["prompt"].lower() for kw in _MULTI_STEP_KEYWORDS)
-
-        result = await self.runner.run(
-            prompt=task["prompt"],
-            oneshot=oneshot,
-            system_prompt=system_prompt,
-            session_id=task.get("session_id"),
-            working_dir=working_dir,
-            timeout=timeout,
-            allowed_tools=allowed_tools,
-        )
+        try:
+            result = await self.runner.run(
+                prompt=augmented_prompt,
+                system_prompt=system_prompt,
+                session_id=task.get("session_id"),
+                working_dir=working_dir,
+                timeout=timeout,
+                allowed_tools=allowed_tools,
+            )
+        finally:
+            self._running_tasks.discard(task_id)
 
         # Log the response
         await self.db.add_conversation(task_id, role="assistant", content=result.stdout)
@@ -111,7 +168,10 @@ class Orchestrator:
             logger.warning(f"Task {task_id} failed: {result.stderr[:200]}")
 
     async def chat(self, chat_id: int, message: str) -> str:
-        """Send a message in a chat and get a response. Resumes Claude sessions for multi-turn."""
+        """Send a message in a chat and get a response. Resumes Claude sessions for multi-turn.
+
+        Stores user + assistant messages and manages session continuity.
+        """
         lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             chat = await self.db.get_chat(chat_id)
@@ -121,11 +181,6 @@ class Orchestrator:
             # Store user message
             await self.db.add_chat_message(chat_id, role="user", content=message)
 
-            # Create pending assistant message (drives UI "thinking" state)
-            pending_msg_id = await self.db.add_chat_message(
-                chat_id, role="assistant", content="", status="pending",
-            )
-
             # Get agent config for system prompt
             agent = await self.db.get_agent("general")
             system_prompt = agent["system_prompt"] if agent else None
@@ -133,7 +188,6 @@ class Orchestrator:
             # Run Claude — use JSON format to extract session_id
             result = await self.runner.run(
                 prompt=message,
-                oneshot=False,
                 system_prompt=system_prompt,
                 session_id=chat.get("session_id"),
                 output_format="json",
@@ -143,9 +197,10 @@ class Orchestrator:
             if result.session_id:
                 await self.db.update_chat(chat_id, session_id=result.session_id)
 
-            # Update pending message with actual response
             response = result.stdout if result.success else f"Error: {result.stderr}"
-            await self.db.update_chat_message(pending_msg_id, content=response, status="complete")
+
+            # Store assistant response
+            await self.db.add_chat_message(chat_id, role="assistant", content=response)
 
             # Update chat timestamp
             await self.db.update_chat(chat_id)
@@ -161,6 +216,9 @@ class Orchestrator:
 
     async def process_queue(self) -> None:
         """Process pending tasks from the queue."""
+        if self._stopped:
+            return
+
         pending = await self.db.get_pending_tasks()
         if not pending:
             return
@@ -183,6 +241,29 @@ class Orchestrator:
     def stop_processing(self):
         """Stop the background task processor loop."""
         self._processing = False
+
+    # --- Agent Delegation ---
+
+    async def delegate(self, from_task_id: int, to_agent: str, prompt: str,
+                       working_dir: str | None = None) -> str:
+        """Delegate work to another agent and wait for the result.
+
+        Creates a new task for `to_agent`, executes it, and returns the result.
+        The delegated task is linked to the parent task via source.
+        """
+        task_id = await self.submit(
+            agent_type=to_agent, prompt=prompt,
+            working_dir=working_dir, source=f"delegation:{from_task_id}",
+        )
+        logger.info(f"Task {from_task_id} delegated to {to_agent} as task {task_id}")
+
+        await self.execute_task(task_id)
+
+        task = await self.db.get_task(task_id)
+        if task and task["status"] == "completed":
+            return task.get("result", "")
+        error = task.get("error", "Unknown error") if task else "Task not found"
+        return f"Delegation failed: {error}"
 
     # --- Project orchestration ---
 

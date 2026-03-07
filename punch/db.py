@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -10,12 +10,14 @@ from typing import Any
 _ALLOWED_COLUMNS = {
     "tasks": {"status", "result", "error", "session_id", "working_dir", "started_at", "completed_at", "priority"},
     "cron_jobs": {"name", "schedule", "agent_type", "prompt", "enabled", "last_run", "next_run"},
-    "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent", "allowed_tools"},
+    "agents": {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent", "allowed_tools", "require_approval"},
     "browser_sessions": {"url", "screenshot_path", "status"},
     "projects": {"name", "brief", "status", "updated_at"},
     "project_tasks": {"title", "agent_type", "prompt", "position", "depends_on", "status"},
     "chats": {"title", "session_id", "is_active", "updated_at"},
     "chat_messages": {"content", "status"},
+    "memories": {"key", "content", "category"},
+    "webhooks": {"name", "agent_type", "secret", "enabled"},
 }
 
 
@@ -80,6 +82,7 @@ class Database:
                 timeout_seconds INTEGER DEFAULT 300,
                 max_concurrent INTEGER DEFAULT 1,
                 allowed_tools TEXT,
+                require_approval BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -155,6 +158,28 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(project_id);
             CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id);
             CREATE INDEX IF NOT EXISTS idx_chats_active ON chats(is_active);
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                category TEXT DEFAULT 'general',
+                source_task_id INTEGER REFERENCES tasks(id),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                agent_type TEXT NOT NULL DEFAULT 'general',
+                secret TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+            CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);
+            CREATE INDEX IF NOT EXISTS idx_webhooks_name ON webhooks(name);
         """)
         await self._conn.commit()
 
@@ -191,9 +216,9 @@ class Database:
         _validate_columns("tasks", kwargs)
         if "status" in kwargs:
             if kwargs["status"] == "running":
-                kwargs.setdefault("started_at", datetime.utcnow().isoformat())
+                kwargs.setdefault("started_at", datetime.now(timezone.utc).isoformat())
             elif kwargs["status"] in ("completed", "failed"):
-                kwargs.setdefault("completed_at", datetime.utcnow().isoformat())
+                kwargs.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [task_id]
         await self.execute(f"UPDATE tasks SET {sets} WHERE id = ?", tuple(vals))
@@ -326,7 +351,7 @@ class Database:
 
     async def update_project(self, project_id: int, **kwargs) -> None:
         _validate_columns("projects", kwargs)
-        kwargs["updated_at"] = datetime.utcnow().isoformat()
+        kwargs["updated_at"] = datetime.now(timezone.utc).isoformat()
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [project_id]
         await self.execute(f"UPDATE projects SET {sets} WHERE id = ?", tuple(vals))
@@ -406,7 +431,7 @@ class Database:
 
     async def update_chat(self, chat_id: int, **kwargs) -> None:
         _validate_columns("chats", kwargs)
-        kwargs["updated_at"] = datetime.utcnow().isoformat()
+        kwargs["updated_at"] = datetime.now(timezone.utc).isoformat()
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [chat_id]
         await self.execute(f"UPDATE chats SET {sets} WHERE id = ?", tuple(vals))
@@ -450,3 +475,58 @@ class Database:
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [message_id]
         await self.execute(f"UPDATE chat_messages SET {sets} WHERE id = ?", tuple(vals))
+
+    # --- Memories ---
+
+    async def create_memory(self, key: str, content: str, category: str = "general",
+                            source_task_id: int | None = None) -> int:
+        return await self.execute(
+            "INSERT INTO memories (key, content, category, source_task_id) VALUES (?, ?, ?, ?)",
+            (key, content, category, source_task_id),
+        )
+
+    async def search_memories(self, query: str, category: str | None = None, limit: int = 5) -> list[dict]:
+        sql = "SELECT * FROM memories WHERE (key LIKE ? OR content LIKE ?)"
+        params: list = [f"%{query}%", f"%{query}%"]
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return await self.fetch_all(sql, tuple(params))
+
+    async def list_memories(self, category: str | None = None, limit: int = 50) -> list[dict]:
+        if category:
+            return await self.fetch_all(
+                "SELECT * FROM memories WHERE category = ? ORDER BY created_at DESC LIMIT ?",
+                (category, limit),
+            )
+        return await self.fetch_all(
+            "SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,),
+        )
+
+    async def delete_memory(self, memory_id: int) -> None:
+        await self.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+
+    # --- Webhooks ---
+
+    async def create_webhook(self, name: str, agent_type: str, secret: str) -> int:
+        return await self.execute(
+            "INSERT INTO webhooks (name, agent_type, secret) VALUES (?, ?, ?)",
+            (name, agent_type, secret),
+        )
+
+    async def get_webhook(self, name: str) -> dict | None:
+        return await self.fetch_one("SELECT * FROM webhooks WHERE name = ?", (name,))
+
+    async def list_webhooks(self) -> list[dict]:
+        return await self.fetch_all("SELECT * FROM webhooks ORDER BY name")
+
+    async def update_webhook(self, webhook_id: int, **kwargs) -> None:
+        _validate_columns("webhooks", kwargs)
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        vals = list(kwargs.values()) + [webhook_id]
+        await self.execute(f"UPDATE webhooks SET {sets} WHERE id = ?", tuple(vals))
+
+    async def delete_webhook(self, webhook_id: int) -> None:
+        await self.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))

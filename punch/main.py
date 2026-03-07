@@ -6,13 +6,16 @@ import asyncio
 import logging
 import signal
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from punch.config import PunchConfig
 from punch.db import Database
 from punch.runner import ClaudeRunner
 from punch.orchestrator import Orchestrator
 from punch.scheduler import PunchScheduler
-from punch.browser import BrowserManager
-
+from punch.memory import Memory
+from punch.health import HealthChecker
 logger = logging.getLogger("punch")
 
 
@@ -60,17 +63,20 @@ async def main():
     # Seed defaults
     await seed_default_agents(db)
 
+    # Apply DB settings (from onboarding/settings UI) as fallbacks
+    await config.apply_db_settings(db)
+
     # Claude Code runner
     runner = ClaudeRunner(
         claude_command=config.claude_command,
         max_concurrent=config.max_concurrent_tasks,
     )
 
-    # Orchestrator
-    orchestrator = Orchestrator(db=db, runner=runner)
+    # Memory system
+    memory = Memory(db)
 
-    # Browser manager
-    browser = BrowserManager(screenshots_dir=config.screenshots_dir, cdp_url=config.browser_cdp_url)
+    # Orchestrator
+    orchestrator = Orchestrator(db=db, runner=runner, memory=memory)
 
     # Scheduler
     scheduler = PunchScheduler(db=db, submit_fn=orchestrator.submit)
@@ -90,18 +96,29 @@ async def main():
             allowed_users=config.telegram_allowed_users,
             start_project_fn=orchestrator.start_project,
             chat_fn=orchestrator.chat,
+            estop_fn=orchestrator.estop,
+            resume_fn=orchestrator.resume,
         )
         orchestrator.on_notify(telegram_bot.notify)
+        orchestrator.on_approval(telegram_bot.request_approval)
         await telegram_bot.start()
         logger.info("Telegram bot started")
     else:
         logger.warning("PUNCH_TELEGRAM_TOKEN not set — Telegram bot disabled")
 
+    # Health checker
+    health_checker = HealthChecker(
+        db=db, runner=runner, scheduler=scheduler, telegram_bot=telegram_bot,
+    )
+
     # Web server
     from punch.web.app import create_app
     import uvicorn
 
-    app = create_app(db=db, orchestrator=orchestrator, scheduler=scheduler, api_key=config.api_key)
+    app = create_app(
+        db=db, orchestrator=orchestrator, scheduler=scheduler,
+        api_key=config.api_key, health_checker=health_checker,
+    )
 
     uvicorn_config = uvicorn.Config(
         app=app,
@@ -113,6 +130,44 @@ async def main():
 
     # Start task processor
     processor_task = asyncio.create_task(orchestrator.start_processing())
+
+    # Health watchdog: periodically check system health and alert on issues
+    async def watchdog(interval: float = 60.0):
+        last_status = "healthy"
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                health = await health_checker.check_all()
+                status = health["status"]
+                if status != "healthy" and last_status == "healthy":
+                    msg = f"System health degraded: {status}\n"
+                    for name, comp in health["components"].items():
+                        if not comp.get("ok"):
+                            msg += f"  - {name}: {comp.get('error', 'unhealthy')}\n"
+                    logger.warning(msg)
+                    if telegram_bot:
+                        for user_id in config.telegram_allowed_users:
+                            try:
+                                await telegram_bot._app.bot.send_message(
+                                    chat_id=user_id, text=f"\u26a0\ufe0f {msg}",
+                                )
+                            except Exception:
+                                pass
+                elif status == "healthy" and last_status != "healthy":
+                    logger.info("System health recovered")
+                    if telegram_bot:
+                        for user_id in config.telegram_allowed_users:
+                            try:
+                                await telegram_bot._app.bot.send_message(
+                                    chat_id=user_id, text="\u2705 System health recovered",
+                                )
+                            except Exception:
+                                pass
+                last_status = status
+            except Exception as e:
+                logger.error(f"Watchdog error: {e}")
+
+    watchdog_task = asyncio.create_task(watchdog())
 
     logger.info(f"Punch ready at http://{config.web_host}:{config.web_port}")
 
@@ -132,7 +187,6 @@ async def main():
     scheduler.shutdown()
     if telegram_bot:
         await telegram_bot.stop()
-    await browser.stop()
     server.should_exit = True
     await server_task
     await db.close()

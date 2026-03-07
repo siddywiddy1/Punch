@@ -23,6 +23,8 @@ async def test_initialize_creates_tables(db):
     assert "conversations" in table_names
     assert "settings" in table_names
     assert "browser_sessions" in table_names
+    assert "memories" in table_names
+    assert "webhooks" in table_names
 
 
 @pytest.mark.asyncio

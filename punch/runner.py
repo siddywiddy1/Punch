@@ -81,6 +81,7 @@ class ClaudeRunner:
         logger.info(f"Running Claude Code: {' '.join(cmd[:5])}...")
 
         async with self._semaphore:
+            proc = None
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,

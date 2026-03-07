@@ -71,7 +71,8 @@ SETTINGS_SCHEMA = [
 ]
 
 
-def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | None = None) -> FastAPI:
+def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | None = None,
+               health_checker=None) -> FastAPI:
     app = FastAPI(title="Punch", docs_url="/api/docs")
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
@@ -79,11 +80,12 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     app.state.db = db
     app.state.orchestrator = orchestrator
     app.state.scheduler = scheduler
+    app.state.health_checker = health_checker
 
     # Paths that skip onboarding redirect
     _SKIP_ONBOARDING = ("/static", "/api/", "/onboarding", "/htmx/onboarding")
 
-    # API key authentication + onboarding middleware
+    # API key authentication + CSRF + onboarding middleware
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         path = request.url.path
@@ -98,6 +100,16 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
                 )
                 if provided != api_key:
                     return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        # CSRF protection: reject mutating requests from foreign origins
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            origin = request.headers.get("origin")
+            if origin:
+                from urllib.parse import urlparse
+                parsed = urlparse(origin)
+                expected_host = request.headers.get("host", "").split(":")[0]
+                if parsed.hostname not in (expected_host, "localhost", "127.0.0.1"):
+                    return JSONResponse({"error": "CSRF rejected"}, status_code=403)
 
         # Onboarding redirect: if onboarding_complete not set, redirect HTML pages
         if not any(path.startswith(p) for p in _SKIP_ONBOARDING):
@@ -234,10 +246,10 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
     @app.post("/htmx/chat/{chat_id}/send", response_class=HTMLResponse)
     async def htmx_chat_send(request: Request, chat_id: int, message: str = Form(...)):
         if orchestrator:
-            # Store user message and create pending assistant message
+            # Store user message and create pending assistant placeholder
             await db.add_chat_message(chat_id, role="user", content=message)
             await db.add_chat_message(chat_id, role="assistant", content="", status="pending")
-            # Kick off async chat processing
+            # Process in background (orchestrator.chat handles Claude + session)
             asyncio.create_task(_process_chat(chat_id, message))
         messages = await db.get_chat_messages(chat_id)
         return templates.TemplateResponse("partials/chat_messages.html", {
@@ -245,7 +257,7 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         })
 
     async def _process_chat(chat_id: int, message: str):
-        """Background task: run chat and update pending message."""
+        """Background task: run Claude and update the pending assistant message."""
         try:
             chat = await db.get_chat(chat_id)
             if not chat:
@@ -255,7 +267,6 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
 
             result = await orchestrator.runner.run(
                 prompt=message,
-                oneshot=False,
                 system_prompt=system_prompt,
                 session_id=chat.get("session_id"),
                 output_format="json",
@@ -266,7 +277,7 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
 
             response = result.stdout if result.success else f"Error: {result.stderr}"
 
-            # Find and update the pending message
+            # Update the pending message with the actual response
             msgs = await db.get_chat_messages(chat_id)
             for msg in reversed(msgs):
                 if msg["role"] == "assistant" and msg["status"] == "pending":
@@ -275,7 +286,7 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
 
             await db.update_chat(chat_id)
 
-            # Auto-title
+            # Auto-title from first message
             if chat["title"] == "New Chat":
                 title = message[:50].strip()
                 if len(message) > 50:
@@ -484,10 +495,15 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         )
         return {"agent_id": agent_id}
 
+    _ALLOWED_AGENT_FIELDS = {"system_prompt", "working_dir", "timeout_seconds", "max_concurrent", "allowed_tools"}
+
     @app.put("/api/agents/{name}")
     async def api_update_agent(name: str, request: Request):
         body = await request.json()
-        await db.update_agent(name, **body)
+        filtered = {k: v for k, v in body.items() if k in _ALLOWED_AGENT_FIELDS}
+        if not filtered:
+            return JSONResponse({"error": "No valid fields provided"}, status_code=400)
+        await db.update_agent(name, **filtered)
         return {"ok": True}
 
     @app.get("/api/agents")
@@ -558,14 +574,19 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         tasks = await db.list_project_tasks(project_id)
         return {"project": project, "tasks": tasks}
 
+    _ALLOWED_PROJECT_FIELDS = {"name", "brief", "status"}
+
     @app.put("/api/projects/{project_id}")
     async def api_update_project(project_id: int, request: Request):
         body = await request.json()
-        if "status" in body and body["status"] not in _VALID_PROJECT_STATUSES:
+        filtered = {k: v for k, v in body.items() if k in _ALLOWED_PROJECT_FIELDS}
+        if not filtered:
+            return JSONResponse({"error": "No valid fields provided"}, status_code=400)
+        if "status" in filtered and filtered["status"] not in _VALID_PROJECT_STATUSES:
             return JSONResponse({"error": f"Invalid status. Must be one of: {_VALID_PROJECT_STATUSES}"}, status_code=400)
-        if "brief" in body and len(body.get("brief", "")) > _MAX_BRIEF_SIZE:
+        if "brief" in filtered and len(filtered.get("brief", "")) > _MAX_BRIEF_SIZE:
             return JSONResponse({"error": f"brief exceeds {_MAX_BRIEF_SIZE} chars"}, status_code=400)
-        await db.update_project(project_id, **body)
+        await db.update_project(project_id, **filtered)
         return {"ok": True}
 
     @app.delete("/api/projects/{project_id}")
@@ -612,9 +633,13 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         )
         return {"project_task_id": pt_id}
 
+    _ALLOWED_PT_FIELDS = {"title", "agent_type", "prompt", "position", "depends_on", "status"}
+
     @app.put("/api/project-tasks/{pt_id}")
     async def api_update_project_task(pt_id: int, request: Request):
-        body = await request.json()
+        body = {k: v for k, v in (await request.json()).items() if k in _ALLOWED_PT_FIELDS}
+        if not body:
+            return JSONResponse({"error": "No valid fields provided"}, status_code=400)
         if "status" in body and body["status"] not in _VALID_PT_STATUSES:
             return JSONResponse({"error": f"Invalid status. Must be one of: {_VALID_PT_STATUSES}"}, status_code=400)
         if "prompt" in body and len(body.get("prompt", "")) > _MAX_PROMPT_SIZE:
@@ -644,5 +669,120 @@ def create_app(db: Database, orchestrator=None, scheduler=None, api_key: str | N
         return templates.TemplateResponse("partials/project_task_list.html", {
             "request": request, "project": project, "project_tasks": project_tasks,
         })
+
+    # --- Health Check ---
+
+    @app.get("/api/health")
+    async def api_health():
+        if health_checker:
+            return await health_checker.check_all()
+        return {"status": "ok", "components": {}}
+
+    # --- Emergency Stop ---
+
+    @app.post("/api/estop")
+    async def api_estop():
+        if not orchestrator:
+            return JSONResponse({"error": "No orchestrator"}, status_code=500)
+        result = await orchestrator.estop()
+        return {"status": "stopped", **result}
+
+    @app.post("/api/resume")
+    async def api_resume():
+        if not orchestrator:
+            return JSONResponse({"error": "No orchestrator"}, status_code=500)
+        orchestrator.resume()
+        return {"status": "resumed"}
+
+    @app.get("/api/estop/status")
+    async def api_estop_status():
+        if not orchestrator:
+            return {"stopped": False}
+        return {"stopped": orchestrator.is_stopped}
+
+    # --- Webhook Ingestion ---
+
+    @app.post("/api/webhooks")
+    async def api_create_webhook(request: Request):
+        body = await request.json()
+        name = body.get("name")
+        if not name or not isinstance(name, str):
+            return JSONResponse({"error": "name is required"}, status_code=400)
+        agent_type = body.get("agent_type", "general")
+        import secrets
+        secret = body.get("secret") or secrets.token_urlsafe(32)
+        webhook_id = await db.create_webhook(name=name, agent_type=agent_type, secret=secret)
+        return {"webhook_id": webhook_id, "secret": secret}
+
+    @app.get("/api/webhooks")
+    async def api_list_webhooks():
+        return await db.list_webhooks()
+
+    @app.delete("/api/webhooks/{webhook_id}")
+    async def api_delete_webhook(webhook_id: int):
+        await db.delete_webhook(webhook_id)
+        return {"ok": True}
+
+    @app.post("/api/webhook/{name}")
+    async def api_trigger_webhook(name: str, request: Request):
+        webhook = await db.get_webhook(name)
+        if not webhook:
+            return JSONResponse({"error": "Webhook not found"}, status_code=404)
+        if not webhook["enabled"]:
+            return JSONResponse({"error": "Webhook disabled"}, status_code=403)
+
+        # Validate secret via header or query param
+        provided_secret = (
+            request.headers.get("X-Webhook-Secret")
+            or request.query_params.get("secret")
+        )
+        if provided_secret != webhook["secret"]:
+            return JSONResponse({"error": "Invalid secret"}, status_code=401)
+
+        # Parse payload
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        prompt = body.get("prompt") or body.get("message") or json.dumps(body)
+        if not orchestrator:
+            task_id = await db.create_task(
+                agent_type=webhook["agent_type"], prompt=prompt, source=f"webhook:{name}",
+            )
+        else:
+            task_id = await orchestrator.submit(
+                webhook["agent_type"], prompt, source=f"webhook:{name}",
+            )
+            asyncio.create_task(orchestrator.execute_task(task_id))
+
+        return {"task_id": task_id}
+
+    # --- Memory API ---
+
+    @app.post("/api/memories")
+    async def api_create_memory(request: Request):
+        body = await request.json()
+        key = body.get("key")
+        content = body.get("content")
+        if not key or not content:
+            return JSONResponse({"error": "key and content are required"}, status_code=400)
+        memory_id = await db.create_memory(
+            key=key, content=content,
+            category=body.get("category", "general"),
+            source_task_id=body.get("source_task_id"),
+        )
+        return {"memory_id": memory_id}
+
+    @app.get("/api/memories")
+    async def api_list_memories(q: str = None, category: str = None, limit: int = 50):
+        if q:
+            return await db.search_memories(query=q, category=category, limit=limit)
+        return await db.list_memories(category=category, limit=limit)
+
+    @app.delete("/api/memories/{memory_id}")
+    async def api_delete_memory(memory_id: int):
+        await db.delete_memory(memory_id)
+        return {"ok": True}
 
     return app

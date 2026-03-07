@@ -3,7 +3,7 @@
 PYTHON ?= python3
 VENV = venv
 PIP = $(VENV)/bin/pip
-PYTON_BIN = $(VENV)/bin/python
+PYTHON_BIN = $(VENV)/bin/python
 SERVICE = com.punch.assistant
 PLIST = ~/Library/LaunchAgents/$(SERVICE).plist
 
@@ -13,7 +13,7 @@ install: ## Full install: venv, deps, playwright, .env
 	@echo "=== Installing Punch ==="
 	@test -d $(VENV) || $(PYTHON) -m venv $(VENV)
 	$(PIP) install -r punch/requirements.txt
-	$(PYTON_BIN) -m playwright install chromium
+	$(PYTHON_BIN) -m playwright install chromium
 	@mkdir -p data/screenshots data/workspaces
 	@test -f .env || cp .env.example .env
 	@echo ""
@@ -23,10 +23,10 @@ install: ## Full install: venv, deps, playwright, .env
 
 start: ## Start Punch in foreground
 	@echo "Starting Punch..."
-	$(PYTON_BIN) -m punch.main
+	$(PYTHON_BIN) -m punch.main
 
 start-bg: ## Start Punch as a background launchd service
-	@cp punch.plist $(PLIST)
+	@sed -e 's|__PUNCH_DIR__|$(CURDIR)|g' -e 's|__PUNCH_VENV__|$(CURDIR)/$(VENV)|g' punch.plist > $(PLIST)
 	launchctl load $(PLIST)
 	@echo "Punch started as background service"
 	@echo "Dashboard: http://localhost:8080"
@@ -46,13 +46,13 @@ update: ## Pull latest code, update deps, restart
 	@echo "=== Updating Punch ==="
 	git pull --ff-only
 	$(PIP) install -r punch/requirements.txt --upgrade
-	$(PYTON_BIN) -m playwright install chromium
+	$(PYTHON_BIN) -m playwright install chromium
 	@echo ""
 	@echo "Update complete."
 	@if launchctl list | grep -q $(SERVICE); then \
 		echo "Restarting service..."; \
 		launchctl unload $(PLIST); \
-		cp punch.plist $(PLIST); \
+		sed -e 's|__PUNCH_DIR__|$(CURDIR)|g' -e 's|__PUNCH_VENV__|$(CURDIR)/$(VENV)|g' punch.plist > $(PLIST); \
 		launchctl load $(PLIST); \
 		echo "Punch restarted with new version."; \
 	else \
@@ -70,10 +70,10 @@ logs-error: ## Tail the error log
 # === Development ===
 
 test: ## Run test suite
-	$(PYTON_BIN) -m pytest tests/ -v
+	$(PYTHON_BIN) -m pytest tests/ -v
 
 test-quick: ## Run tests without verbose
-	$(PYTON_BIN) -m pytest tests/ -q
+	$(PYTHON_BIN) -m pytest tests/ -q
 
 # === Cleanup ===
 

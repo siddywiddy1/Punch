@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from punch.sanitizer import sanitize_and_frame
 
@@ -79,7 +79,7 @@ class BrowserManager:
 
     async def screenshot(self, page, name: str | None = None) -> str:
         if not name:
-            name = f"screenshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
+            name = f"screenshot_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.png"
         path = Path(self.screenshots_dir) / name
         await page.screenshot(path=str(path))
         return str(path)
